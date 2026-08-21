@@ -1,8 +1,20 @@
-# UARTMPU — an MPU-401 facade over a plain serial UART
+# MPUSHIM — an MPU-401 facade over a plain serial UART
 
 A tiny resident DOS tool that lets **games** talk to a bare serial-UART MIDI
 interface (like the one hiding inside the EXP GAME/MIDI G3 PC Card) as though
 it were an **MPU-401 at 330h**.
+
+**Status: bench-proven, two backends.** Both on an IBM PC110 (486SX):
+
+- **EXP GAME/MIDI G3 PC Card** (its hidden UART at 250h) → Roland CM-32L:
+  DOSMid in real MPU mode (`/mpu=330`) detects and plays through the
+  facade, and **The Secret of Monkey Island's Roland MT-32 music works** —
+  the same setup that hard-wedges without MPUSHIM.
+- **serdashop MPU-232** serial-MIDI dongle on a plain COM port: DOSMid
+  `/mpu=330` plays to an external synth on a machine with **no sound card
+  and no free slot** — game MIDI from nothing but a serial port.
+
+(DOSMid note: with Jemm loaded dynamically from the prompt, add `/noxms`.)
 
 ## The problem
 
@@ -16,7 +28,7 @@ that never reports "no data", so the game hangs on a blank screen before it
 draws its first frame. (This is exactly what wedged Monkey Island against the
 EXP G3's UART.)
 
-## What UARTMPU does
+## What MPUSHIM does
 
 It traps the two MPU I/O ports (`330h` data, `331h` status/command) and:
 
@@ -33,17 +45,38 @@ the **QPI** interface — the QEMM Programming Interface, a published standard
 implemented by QEMM386, Jemm's QPIEMU, and crazii's VDPMI alike — so it is
 *not itself* a protected-mode DPMI client, which keeps it small and robust.
 
-## Coverage
+## Coverage and roadmap
 
 QPI's real-mode trap covers **V86-mode (real-mode) programs** — which is
 precisely the MPU-401 era: SCUMM/iMUSE, Sierra SCI, Miles-driver games. That
-is the target. Protected-mode DPMI games that do their MPU I/O from ring-3,
-and VCPI-only extenders, are out of scope (the usual residue every solution
+is what v0.1 serves, in **UART mode** (the mode virtually everything after
+~1990 uses).
+
+Not covered yet, all planned:
+
+- **32-bit protected-mode games** (DOS4GW/DPMI titles doing MPU I/O from
+  ring-3 — the General MIDI generation: Duke3D, Descent, Warcraft II, ...):
+  needs a second trap registration with the protected-mode host
+  (HDPMI32i). Planned as v0.2 — with a GM module on the DIN this opens the
+  whole DOS4GW library.
+- **16-bit protected-mode games** (the 16-bit DPMI client class —
+  Tyrian, for one): DPMI hosts handle 16- and 32-bit clients separately,
+  so this is its own registration against HDPMI16i. Also on the roadmap.
+- **Intelligent mode** (the MPU-401's onboard 8-track sequencer, used by
+  early Sierra AGI/early-SCI titles ~1986-1990): needs a command state
+  machine, a timer-driven track engine, and virtual-IRQ delivery to the
+  game. Planned as v0.3.
+
+(On Pentium-class machines VDPMI covers V86 plus both 16- and 32-bit DPMI
+clients in one host — the 486 fleet is where the per-host registrations
+matter.)
+
+VCPI-only extenders remain out of scope (the usual residue every solution
 in this space shares).
 
 ## Host requirement — pick the one your machine can run
 
-UARTMPU needs a QPI provider resident. Two options, same result:
+MPUSHIM needs a QPI provider resident. Two options, same result:
 
 - **JEMM386 + QPIEMU** — runs on any 386+; the right choice on older/slower
   hardware (e.g. the 486-class IBM PC110, where MPU-era games run at the
@@ -54,34 +87,57 @@ UARTMPU needs a QPI provider resident. Two options, same result:
 ## Usage
 
 ```
-UARTMPU [/UART=250] [/MPU=330] [/DIV=24] [/U] [/?]
+MPUSHIM [/UART=250] [/MPU=330] [/DIV=24] [/U] [/?]
   /UART=hex  serial UART base I/O port (default 250h)
   /MPU=hex   MPU-401 base the game expects (default 330h; status = base+1)
   /DIV=dec   (re)program the UART divisor for 31250 baud (G3 wants 24);
              omit to leave the UART exactly as the enabler set it
-  /U         unload a resident UARTMPU
+  /U         unload a resident MPUSHIM
   /?         help
 ```
 
-## Bench recipe (EXP G3 on the IBM PC110)
+## Bench recipe (EXP G3 on the IBM PC110) — as proven
 
 ```
-JEMM386 LOAD NOEMS X=D000-EFFF   :: V86 monitor; exclude the card window
+JEMM386 LOAD NOEMS X=DC00-DFFF   :: V86 monitor; exclude the card window
+                                 :: (match the X= to your enabler's /W)
+EXPG3GO /PCIC /W=DC00            :: card up, UART native at 250h (NO /MPU:
+                                 :: presenting 330h is MPUSHIM's job now)
 JLOAD QPIEMU.DLL                 :: QPI port-trap provider
-EXPG3GO /PCIC                    :: card up, UART native at 250h (NO /MPU:
-                                 :: presenting 330h is UARTMPU's job now)
-UARTMPU                          :: trap 330h/331h -> UART at 250h
+MPUSHIM                          :: trap 330h/331h -> UART at 250h
 ```
 
-then start the game and choose **Roland MPU-401 / MT-32** music.
+Quick smoke test: `DOSMID /mpu=330 /noxms CANYON.MID` — if that plays, the
+whole facade works. Then start the game and choose **Roland MPU-401 /
+MT-32** music.
 
-On a Pentium-class machine, swap the first two lines for a single
-`DEVICE=VDPMI.EXE` in CONFIG.SYS (after HIMEMX).
+`GOMIDI.BAT` in this repo is that sequence ready to run; `GOMIDI232.BAT`
+is the MPU-232 variant. On a Pentium-class machine the JEMM386+JLOAD pair
+can be replaced by a single `DEVICE=VDPMI.EXE` in CONFIG.SYS (after
+HIMEMX).
+
+## Serial-port dongles: the MPU-232 (tested)
+
+MPUSHIM is not tied to PCMCIA cards — a standard PC COM port is the same
+16550 programming model, so a serial-MIDI dongle works too. With a
+serdashop **MPU-232** on COM1 (DIP switches all OFF = binary mode, 38400):
+
+```
+JEMM386 LOAD NOEMS
+JLOAD QPIEMU.DLL
+MPUSHIM /UART=3F8 /DIV=3
+```
+
+(`/DIV=3` on a standard 1.8432 MHz COM UART = 38400 baud; the dongle
+converts to MIDI's 31250.) **Bench-tested** on the IBM PC110's serial
+port. Note that dense SysEx bursts arrive at the dongle slightly faster
+than MIDI drains (38400 vs 31250) — fine for game music, which never
+sustains that; a paced-output option can be added if it ever matters.
 
 ## Build
 
 ```
-nasm -f bin UARTMPU.ASM -o UARTMPU.COM
+nasm -f bin MPUSHIM.ASM -o MPUSHIM.COM
 ```
 
 (Builds byte-identical with the on-box NASM at `C:\NASM`.)

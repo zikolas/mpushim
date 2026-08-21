@@ -1,5 +1,5 @@
 ;==========================================================================
-;  UARTMPU 0.1 - a resident MPU-401 (UART mode) facade over a plain serial
+;  MPUSHIM 0.1 - a resident MPU-401 (UART mode) facade over a plain serial
 ;  UART, for DOS games that expect an MPU-401 at 330h.
 ;
 ;  Many PCMCIA "MIDI" cards (e.g. the EXP GAME/MIDI G3) expose only a raw
@@ -11,7 +11,7 @@
 ;  never says "no data", so the game hangs on a blank screen before it
 ;  ever draws.
 ;
-;  UARTMPU sits between the two.  It traps the MPU I/O ports (330h/331h)
+;  MPUSHIM sits between the two.  It traps the MPU I/O ports (330h/331h)
 ;  through the QEMM-compatible QPI port-trap interface - the SAME API that
 ;  QEMM386, Jemm's QPIEMU, and crazii's VDPMI all provide - and:
 ;    - presents a correct MPU-401 UART-mode STATUS byte (so the drain
@@ -28,7 +28,7 @@
 ;  MPU-401 era (SCUMM/iMUSE, Sierra SCI, Miles).
 ;
 ;  Usage:
-;    UARTMPU [/UART=250] [/MPU=330] [/DIV=24] [/U] [/?]
+;    MPUSHIM [/UART=250] [/MPU=330] [/DIV=24] [/U] [/?]
 ;      /UART=hex  base I/O port of the serial UART (default 250h - where
 ;                 EXPG3GO leaves the EXP G3's MIDI UART natively)
 ;      /MPU=hex   MPU-401 base the game expects (default 330h; the status/
@@ -36,15 +36,15 @@
 ;      /DIV=dec   if given, (re)program the UART divisor for 31250 baud
 ;                 (the G3's ~12 MHz UART wants 24); omit to leave the UART
 ;                 exactly as the enabler set it
-;      /U         unload a resident UARTMPU
+;      /U         unload a resident MPUSHIM
 ;      /?         help
 ;
 ;  Prereqs (EXP G3 example):  VDPMI resident, then
 ;      EXPG3GO /PCIC            (UART native at 250h - do NOT use /MPU:
-;                               the 330h presence is UARTMPU's job now)
-;      UARTMPU                  (traps 330h/331h -> UART at 250h)
+;                               the 330h presence is MPUSHIM's job now)
+;      MPUSHIM                  (traps 330h/331h -> UART at 250h)
 ;
-;  Build:  nasm -f bin UARTMPU.ASM -o UARTMPU.COM
+;  Build:  nasm -f bin MPUSHIM.ASM -o MPUSHIM.COM
 ;
 ;  (C) 2026 zikolas, MIT.  Clean-room: the QPI port-trap ABI is the public
 ;  QEMM programming interface (int 67h AX=3F00h entry; far-call functions
@@ -64,7 +64,7 @@ section .text
 ;==========================================================================
 ; installation signature at a fixed offset (103h) so /U can recognise a
 ; resident copy and read its saved state out of the resident segment.
-sig       db 'UMPU'                   ; @103
+sig       db 'MSHM'                   ; @103
 sigver    dw 0001h                    ; @107
 
 ; --- resident state (accessed CS-relative from the trap handler) ---------
@@ -336,9 +336,9 @@ find_qpi:
         ret
 
 ;==========================================================================
-;  do_unload - restore a resident UARTMPU's trapping and free it.
+;  do_unload - restore a resident MPUSHIM's trapping and free it.
 ;  Reads the CURRENT QPI trap handler; if it points at a segment carrying
-;  our 'UMPU' signature, that segment is our resident copy: pull its saved
+;  our 'MSHM' signature, that segment is our resident copy: pull its saved
 ;  old handler + ports out, restore the handler, untrap the ports, free it.
 ;==========================================================================
 do_unload:
@@ -347,9 +347,9 @@ do_unload:
         jc   .fail
         mov  bx, es                   ; candidate resident segment
         ; verify signature at 103h
-        cmp  word [es:103h], 'UM'
+        cmp  word [es:103h], 'MS'
         jne  .notours
-        cmp  word [es:105h], 'PU'
+        cmp  word [es:105h], 'HM'
         jne  .notours
 
         ; restore the handler the resident saved (ES:DI from its oldtrap)
@@ -624,8 +624,8 @@ f_div     db 0
 o_div     db 24
 r_lsr     db 0
 
-m_banner    db 'UARTMPU 0.1 - MPU-401 UART facade over a serial UART',13,10,0
-m_help      db 'Usage: UARTMPU [/UART=250] [/MPU=330] [/DIV=24] [/U] [/?]',13,10
+m_banner    db 'MPUSHIM 0.1 - MPU-401 UART facade over a serial UART',13,10,0
+m_help      db 'Usage: MPUSHIM [/UART=250] [/MPU=330] [/DIV=24] [/U] [/?]',13,10
             db '  /UART=hex  serial UART base (default 250h)',13,10
             db '  /MPU=hex   MPU-401 base the game expects (default 330h)',13,10
             db '  /DIV=dec   reprogram UART divisor for 31250 (G3 wants 24)',13,10
@@ -639,5 +639,5 @@ m_deaduart  db 'WARNING: UART LSR reads FF - is the card enabled? '
 m_ok1       db 'Installed: MPU-401 at ',0
 m_ok2       db ' -> UART ',0
 m_ok3       db '. Resident.',13,10,0
-m_unloaded  db 'UARTMPU unloaded.',13,10,0
-m_notres    db 'No resident UARTMPU found to unload.',13,10,0
+m_unloaded  db 'MPUSHIM unloaded.',13,10,0
+m_notres    db 'No resident MPUSHIM found to unload.',13,10,0

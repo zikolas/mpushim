@@ -13,7 +13,7 @@ rem --- V86 monitor (drop this line if JEMM already loads from CONFIG.SYS) ---
 C:\VSBPCM\JEMM386.EXE LOAD NOEMS X=DC00-DFFF
 
 rem --- enable the card: UART native at 250h.  NO /MPU here - presenting the
-rem     MPU at 330h is UARTMPU's job in software now. ---------------------
+rem     MPU at 330h is MPUSHIM's job in software now. ---------------------
 C:\DEV\EXPG3GO.COM /PCIC /W=DC00
 
 rem --- QPI port-trap provider ------------------------------------------------
@@ -22,8 +22,8 @@ JLOAD QPIEMU.DLL
 cd \
 
 rem --- the facade: trap 330h/331h, forward to the UART at 250h ---------------
-C:\DEV\UARTMPU.COM
+C:\DEV\MPUSHIM.COM
 
 echo.
 echo Ready.  Start your game and choose Roland MPU-401 / MT-32 music.
-echo   (to remove: C:\DEV\UARTMPU.COM /U  then  C:\VSBPCM\JEMM386.EXE UNLOAD)
+echo   (to remove: C:\DEV\MPUSHIM.COM /U  then  C:\VSBPCM\JEMM386.EXE UNLOAD)
