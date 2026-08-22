@@ -11,6 +11,3 @@ rem ==========================================================================
 C:\MPUSHIM\EXPG3GO.COM /PCIC
 C:\MPUSHIM\HDPMI32I.EXE -r -x
 C:\MPUSHIM\MPUSHIM.EXE /UART=250 %1 %2
-echo.
-echo Smoke test:  C:\MPUSHIM\PMPOKE.EXE   (expect FE ACKs + an audible note)
-echo Then start the game normally.

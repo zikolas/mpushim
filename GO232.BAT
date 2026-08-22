@@ -14,5 +14,3 @@ JLOAD QPIEMU.DLL
 C:\MPUSHIM\HDPMI32I.EXE -r -x -v
 C:\MPUSHIM\MPUSHIM.EXE /UART=3F8 /DIV=3 %1 %2
 cd \
-echo.
-echo MPU-232 facade resident. Start the game (music: MPU-401 / GM at 330).

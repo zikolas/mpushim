@@ -550,7 +550,7 @@ static int rm_install(void)
         oldofs = r.x.di;
         if (_farpeekw(_dos_ds, h + 0x103) == 0x534D &&        /* 'MS' */
             _farpeekw(_dos_ds, h + 0x105) == 0x4D48) {        /* 'HM' */
-            outs("V86 trap: MPUSHIM.COM already resident - leaving it in charge.\r\n");
+            outs("V86 trap: not armed - MPUSHIM.COM has it\n");
             return 0;
         }
     }
@@ -560,13 +560,13 @@ static int rm_install(void)
         r.x.ax = 0x1A08;
         r.x.dx = (unsigned short)(g_data + i);
         if (qpi_call(&r) == 0 && r.h.bl) {
-            outs("V86 trap: port already trapped (VSBPCM?) - V86 side skipped.\r\n");
+            outs("V86 trap: not armed - ports already trapped\n");
             return 0;
         }
     }
     blkseg = __dpmi_allocate_dos_memory((mpushimr_bin_len + 15) >> 4, &blksel);
     if (blkseg < 0) {
-        outs("V86 trap: DOS memory allocation failed - V86 side skipped.\r\n");
+        outs("V86 trap: not armed - no DOS memory\n");
         return 0;
     }
     home = (unsigned long)blkseg << 4;
@@ -583,7 +583,7 @@ static int rm_install(void)
     r.x.di = RBLOB_ENTRY;
     if (qpi_call(&r) != 0) {
         __dpmi_free_dos_memory(blksel);
-        outs("V86 trap: QPI set-handler failed - V86 side skipped.\r\n");
+        outs("V86 trap: not armed - QPI rejected it\n");
         return 0;
     }
     for (i = 0; i < 2; i++) {
@@ -602,7 +602,7 @@ static int rm_install(void)
             r.x.di = oldofs;
             qpi_call(&r);
             __dpmi_free_dos_memory(blksel);
-            outs("V86 trap: QPI trap-port failed - V86 side skipped.\r\n");
+            outs("V86 trap: not armed - QPI rejected it\n");
             return 0;
         }
     }
@@ -724,17 +724,17 @@ int main(int argc, char **argv)
         else if (keymatch(a, "NORM"))  norm = 1;
         else if (keymatch(a, "IF"))    g_forceif = 1;
         else {
-            outs("MPUSHIM 0.3 - MPU-401 facade over a serial UART, both worlds:\r\n"
-                 "V86 (real-mode) games via QPI + DPMI/DOS4GW games via HDPMI32i.\r\n"
-                 "  MPUSHIM [/UART=250] [/MPU=330] [/DIV=n] [/NOTX] [/NOCLI]\r\n"
-                 "  /NORM  = skip the V86 (QPI) side   /NOPM = skip the PM side\r\n"
-                 "  /NOTX  = diagnostic: answer the handshake, send no MIDI\r\n"
-                 "  /NOCLI = diagnostic: skip the DOS4G PUSHFD/CLI/POPFD heal\r\n"
-                 "  /NOBC  = diagnostic: no all-notes-off broadcast on reset\r\n"
-                 "  /IF    = diagnostic: force interrupts on at trap return\r\n"
-                 "Installs its traps and stays resident; start games normally.\r\n"
-                 "Hosts: HDPMI32i -r -x (PM); JEMM+QPIEMU / QEMM / VDPMI (V86).\r\n"
-                 "Either alone is fine - each side reports separately.\r\n");
+            outs("MPUSHIM 0.3 - MPU-401 facade over a serial UART, both worlds:\n"
+                 "V86 (real-mode) games via QPI + DPMI/DOS4GW games via HDPMI32i.\n"
+                 "  MPUSHIM [/UART=250] [/MPU=330] [/DIV=n] [/NOTX] [/NOCLI]\n"
+                 "  /NORM  = skip the V86 (QPI) side   /NOPM = skip the PM side\n"
+                 "  /NOTX  = diagnostic: answer the handshake, send no MIDI\n"
+                 "  /NOCLI = diagnostic: skip the DOS4G PUSHFD/CLI/POPFD heal\n"
+                 "  /NOBC  = diagnostic: no all-notes-off broadcast on reset\n"
+                 "  /IF    = diagnostic: force interrupts on at trap return\n"
+                 "Installs its traps and stays resident; start games normally.\n"
+                 "Hosts: HDPMI32i -r -x (PM); JEMM+QPIEMU / QEMM / VDPMI (V86).\n"
+                 "Either alone is fine - each side reports separately.\n");
             return 0;
         }
     }
@@ -743,9 +743,9 @@ int main(int argc, char **argv)
     hdpmi_ok = nopm ? 0 : get_hdpmi();
     qpi_ok   = norm ? 0 : find_qpi();
     if (!hdpmi_ok && !qpi_ok) {
-        outs("MPUSHIM: no trap host at all.\r\n"
-             "  PM side needs HDPMI32i resident (-r -x);\r\n"
-             "  V86 side needs Jemm+QPIEMU, QEMM or VDPMI.\r\n");
+        outs("MPUSHIM: no trap host at all.\n"
+             "  PM side needs HDPMI32i resident (-r -x);\n"
+             "  V86 side needs Jemm+QPIEMU, QEMM or VDPMI.\n");
         return 2;
     }
     __asm__ __volatile__("movw %%ds, %0" : "=m"(g_ds_st));
@@ -780,41 +780,46 @@ int main(int argc, char **argv)
     if (g_notx) outs(" [NOTX: no MIDI will be sent]");
     if (g_nobc) outs(" [NOBC: no reset broadcast]");
     if (g_forceif) outs(" [IF: forcing interrupts on]");
-    outs("\r\n");
+    outs("\n");
 
     if (hdpmi_ok) {
         hdpmi_set_context_mode(0);
         handle = hdpmi_install(g_data, 2);      /* the two MPU ports */
         if (!handle) {
-            outs("PM trap: HDPMI install failed (ports already trapped?).\r\n");
+            outs("PM trap:  not armed - ports already trapped\n");
         } else {
             pm_armed = 1;
-            outs("PM trap: HDPMI handle ");
-            outhex((unsigned)handle, 8);
+            outs("PM trap:  armed\n");
+            /* The DOS/4G CLI heal is on by default and says nothing when it
+             * works - only the exceptions are worth a line: the user turned
+             * it off, or this HDPMI is too old to offer fn 9, which leaves
+             * DOS/4GW games able to wedge (see the header comment). */
             if (nocli)
-                outs(" [NOCLI]");
-            else if (hdpmi_set_cli(&mpushim_cli_handler))
-                outs(" [DOS4G CLI fix]");
-            else
-                outs(" [no fn9: CLI fix unavailable]");
-            outs("\r\n");
+                outs("          (CLI heal off: /NOCLI)\n");
+            else if (!hdpmi_set_cli(&mpushim_cli_handler))
+                outs("          (CLI heal unavailable: this HDPMI has no fn 9"
+                     " - DOS/4GW games may wedge)\n");
         }
-    } else if (!nopm) {
-        outs("PM trap: HDPMI32i not found - DPMI/DOS4GW games NOT covered.\r\n");
+    } else if (nopm) {
+        outs("PM trap:  skipped (/NOPM)\n");
+    } else {
+        outs("PM trap:  not armed - no DPMI host (HDPMI32i -r -x)\n");
     }
 
     if (qpi_ok) {
         rm_armed = rm_install();
-        if (rm_armed) outs("V86 trap: QPI armed - real-mode games covered.\r\n");
-    } else if (!norm) {
-        outs("V86 trap: no QPI host - real-mode games NOT covered.\r\n");
+        if (rm_armed) outs("V86 trap: armed\n");
+    } else if (norm) {
+        outs("V86 trap: skipped (/NORM)\n");
+    } else {
+        outs("V86 trap: not armed - no QPI host (JEMM+QPIEMU, QEMM or VDPMI)\n");
     }
 
     if (!pm_armed && !rm_armed) {
-        outs("MPUSHIM: nothing armed - not going resident.\r\n");
+        outs("MPUSHIM: nothing armed - not going resident.\n");
         return 4;
     }
-    outs("MPUSHIM: resident - start your game normally.\r\n");
+    outs("MPUSHIM: resident.\n");
 
     /* Go resident, the vsbhda way: give DOS back everything but the PSP.
      * Our resident half is pure protected-mode - it never uses the stub,

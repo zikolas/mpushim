@@ -13,6 +13,3 @@ cd \MPUSHIM
 JLOAD QPIEMU.DLL
 C:\MPUSHIM\MPUSHIM.EXE /UART=250 /NOPM %1 %2
 cd \
-echo.
-echo Smoke test:  DOSMID /mpu=330 /noxms CANYON.MID
-echo Then start the game and choose Roland MPU-401 / MT-32 at port 330.

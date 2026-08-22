@@ -21,6 +21,3 @@ JLOAD QPIEMU.DLL
 C:\MPUSHIM\HDPMI32I.EXE -r -x -v
 C:\MPUSHIM\MPUSHIM.EXE /UART=250 %1 %2
 cd \
-echo.
-echo Facade resident for BOTH worlds. Start the game normally.
-echo Smoke tests: C:\MPUSHIM\PMPOKE.EXE (PM side), DOSMID /mpu=330 (V86 side).
