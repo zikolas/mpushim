@@ -1,20 +1,31 @@
-/* MPUSHIMP - protected-mode companion to MPUSHIM: an MPU-401 (UART mode)
- * facade for DOS games that run as 32-bit DPMI clients (DOS4GW & friends)
- * and do their MPU I/O from ring 3, which the real-mode QPI trap that
- * MPUSHIM.COM uses cannot see.
+/* MPUSHIMP 0.3 - the WHOLE MPU-401 (UART mode) facade in one binary: an
+ * MPU-401 at 330h over a plain serial UART (the EXP GAME/MIDI G3's hidden
+ * UART at 250h, or a COM port + an MPU-232 dongle), for BOTH worlds:
  *
- * It traps the MPU ports through HDPMI32i's documented I/O-trap API and runs
- * the same facade as MPUSHIM.COM: a correct MPU-401 UART-mode status byte,
- * the 0FEh reset/UART-mode ACK, and MIDI data forwarded to a real serial
- * UART (the EXP GAME/MIDI G3's hidden UART at 250h, or a COM port + an
- * MPU-232 dongle).
+ *  - V86 (real-mode) games - SCUMM/iMUSE, Sierra, Miles: a 199-byte
+ *    real-mode core (MPUSHIMR.ASM, embedded as a blob) is planted in a
+ *    small DOS block of its own and registered with the QPI port-trap
+ *    host (Jemm's QPIEMU, QEMM, or VDPMI);
+ *  - 32-bit DPMI/DOS4GW games - the General MIDI era: FAR32 handlers
+ *    registered through HDPMI32i's documented I/O-trap API.
  *
- *     MPUSHIMP [/UART=250] [/MPU=330] [/DIV=n] [/NOTX] [/NOCLI] [/IF]
+ * Either host alone is fine; each side installs and reports independently
+ * (a PM-only boot just notes there is no QPI host, and vice versa).  Both
+ * facades behave identically: correct MPU-401 UART-mode status (always
+ * write-ready), the 0FEh reset/UART-mode ACK, All-Notes-Off broadcast on
+ * reset, and MIDI data paced onto the real UART, never dropped.  This
+ * supersedes the separate MPUSHIM.COM + MPUSHIMP pair (the standalone
+ * .COM remains in the repo for QPI-only stacks without any DPMI host).
  *
- * It installs the trap and stays resident; games are then started NORMALLY.
- * Prereqs: HDPMI32i resident as the DPMI host (-r -x), and the UART already
- * brought up (EXPG3GO /PCIC for the G3; a COM port needs no enabler).
- * Build: ./build-pm.sh (DJGPP).  Remove: reboot.  MIT (c) 2026 zikolas.
+ *     MPUSHIMP [/UART=250] [/MPU=330] [/DIV=n] [/NORM] [/NOPM]
+ *              [/NOTX] [/NOCLI] [/NOBC] [/IF]
+ *
+ * It installs its traps and stays resident; games are then started
+ * NORMALLY.  Prereqs: HDPMI32i resident (-r -x) for the PM side, a QPI
+ * host for the V86 side, and the UART already brought up (EXPG3GO /PCIC
+ * for the G3; a COM port needs no enabler).
+ * Build: ./build-pm.sh (nasm + DJGPP).  Remove: reboot.
+ * MIT (c) 2026 zikolas.
  *
  * TWO HOST-INTERACTION BUGS, found 2026-08-22 by reading the HDPMI source
  * (HX repo, public), explain why every DJGPP test client passed while both
@@ -64,8 +75,26 @@
 #include <pc.h>
 #include <dos.h>
 #include <unistd.h>
+#include <string.h>
 #include <sys/farptr.h>
+#include <sys/movedata.h>
+#include <sys/segments.h>
 #include <sys/exceptn.h>
+
+/* The real-mode (V86) resident core, assembled flat from MPUSHIMR.ASM and
+ * embedded here (build-pm.sh: nasm -> xxd -i).  At install it is copied
+ * into a small DOS-memory block of its own (this client's, so it survives
+ * the TSR), patched, and registered with the QPI port-trap host, so ONE
+ * binary covers both worlds: V86 (real-mode) games through QPI and ring-3
+ * DPMI games through HDPMI.  Each world runs its own facade state, exactly
+ * like the previously separate MPUSHIM.COM + MPUSHIMP pair proved out. */
+#include "mpushimr.h"
+#define RBLOB_UART   4    /* state-header offsets, must match MPUSHIMR.ASM */
+#define RBLOB_DATA   6
+#define RBLOB_STAT   8
+#define RBLOB_NOTX   11
+#define RBLOB_NOBC   12
+#define RBLOB_ENTRY  16   /* QPI handler entry offset inside the blob */
 
 /* Lock every page of this program at startup and keep sbrk from moving the
  * image.  The trap handler can be entered at any time - including while
@@ -454,6 +483,132 @@ static unsigned long hdpmi_install(unsigned start, unsigned count)
     return err ? 0 : handle;
 }
 
+/* ---- QPI (the QEMM Programming Interface) - the V86 port-trap host -----
+ * Provided by QEMM386, Jemm's QPIEMU, and VDPMI alike.  Public ABI: entry
+ * via int 67h AX=3F00h CX='QE' DX='MM' -> ES:DI, or int 2Fh AX=1684h
+ * BX=4354h -> ES:DI; far-call functions 1A06h get / 1A07h set trap
+ * handler, 1A08h port status, 1A09h/1A0Ah trap/untrap; CF = error. */
+static void outs(const char *s);               /* defined below */
+static unsigned short qpi_seg, qpi_ip;         /* far entry; seg 0 = absent */
+
+static int qpi_call(__dpmi_regs *r)            /* far-call QPI; 0 = success */
+{
+    r->x.cs = qpi_seg;
+    r->x.ip = qpi_ip;
+    r->x.ss = r->x.sp = 0;
+    if (__dpmi_simulate_real_mode_procedure_retf(r) != 0) return -1;
+    return (r->x.flags & 1) ? -1 : 0;
+}
+
+static int find_qpi(void)
+{
+    __dpmi_regs r;
+    unsigned long psp = _go32_info_block.linear_address_of_original_psp;
+    /* QEMM / VDPMI answer on int 67h */
+    if (_farpeekl(_dos_ds, 0x67 * 4) != 0) {
+        memset(&r, 0, sizeof r);
+        r.x.ax = 0x3F00; r.x.cx = 0x5145; r.x.dx = 0x4D4D;   /* 'QE' 'MM' */
+        r.x.flags = 0x202;
+        __dpmi_simulate_real_mode_interrupt(0x67, &r);
+        if (r.h.ah == 0 && r.x.es) { qpi_seg = r.x.es; qpi_ip = r.x.di; return 1; }
+    }
+    /* QPIEMU answers on int 2Fh - which must run as a REAL interrupt, so
+     * call a 3-byte INT 2Fh/RETF thunk planted in the PSP's FCB scratch */
+    _farpokel(_dos_ds, psp + 0x5C, 0x00CB2FCDUL);
+    memset(&r, 0, sizeof r);
+    r.x.ax = 0x1684; r.x.bx = 0x4354;
+    r.x.cs = (unsigned short)(psp >> 4); r.x.ip = 0x5C;
+    r.x.ss = r.x.sp = 0;
+    if (__dpmi_simulate_real_mode_procedure_retf(&r) == 0 && r.h.al == 0 && r.x.es) {
+        qpi_seg = r.x.es; qpi_ip = r.x.di;
+        return 1;
+    }
+    return 0;
+}
+
+/* Plant the V86 blob in a small DOS-memory block of its own and arm the
+ * QPI trap.  The block is allocated through the DPMI host and belongs to
+ * this client, so it survives the TSR with everything else; measured on
+ * the bench, the go32 transfer buffer sits at PSP+100h under HDPMI, so
+ * nothing inside our own conventional image is safely reusable.  Returns
+ * 1 if armed; 0 (reason printed) if the V86 side is left alone - which
+ * is not fatal, the PM side still installs. */
+static int rm_install(void)
+{
+    __dpmi_regs r;
+    unsigned short oldseg = 0, oldofs = 0;
+    unsigned long home;
+    int blkseg, blksel;
+    int i;
+
+    /* a standalone MPUSHIM.COM already resident? it already covers V86 */
+    memset(&r, 0, sizeof r);
+    r.x.ax = 0x1A06;                               /* get current handler */
+    if (qpi_call(&r) == 0 && r.x.es) {
+        unsigned long h = (unsigned long)r.x.es << 4;
+        oldseg = r.x.es;
+        oldofs = r.x.di;
+        if (_farpeekw(_dos_ds, h + 0x103) == 0x534D &&        /* 'MS' */
+            _farpeekw(_dos_ds, h + 0x105) == 0x4D48) {        /* 'HM' */
+            outs("V86 trap: MPUSHIM.COM already resident - leaving it in charge.\r\n");
+            return 0;
+        }
+    }
+    /* ports already trapped in V86 (VSBPCM's own MPU emulation)? */
+    for (i = 0; i < 2; i++) {
+        memset(&r, 0, sizeof r);
+        r.x.ax = 0x1A08;
+        r.x.dx = (unsigned short)(g_data + i);
+        if (qpi_call(&r) == 0 && r.h.bl) {
+            outs("V86 trap: port already trapped (VSBPCM?) - V86 side skipped.\r\n");
+            return 0;
+        }
+    }
+    blkseg = __dpmi_allocate_dos_memory((mpushimr_bin_len + 15) >> 4, &blksel);
+    if (blkseg < 0) {
+        outs("V86 trap: DOS memory allocation failed - V86 side skipped.\r\n");
+        return 0;
+    }
+    home = (unsigned long)blkseg << 4;
+    movedata(_my_ds(), (unsigned)mpushimr_bin, _dos_ds, home, mpushimr_bin_len);
+    _farpokew(_dos_ds, home + RBLOB_UART, g_uart);
+    _farpokew(_dos_ds, home + RBLOB_DATA, g_data);
+    _farpokew(_dos_ds, home + RBLOB_STAT, g_stat);
+    _farpokeb(_dos_ds, home + RBLOB_NOTX, g_notx);
+    _farpokeb(_dos_ds, home + RBLOB_NOBC, g_nobc);
+
+    memset(&r, 0, sizeof r);
+    r.x.ax = 0x1A07;                               /* set trap handler */
+    r.x.es = (unsigned short)blkseg;
+    r.x.di = RBLOB_ENTRY;
+    if (qpi_call(&r) != 0) {
+        __dpmi_free_dos_memory(blksel);
+        outs("V86 trap: QPI set-handler failed - V86 side skipped.\r\n");
+        return 0;
+    }
+    for (i = 0; i < 2; i++) {
+        memset(&r, 0, sizeof r);
+        r.x.ax = 0x1A09;                           /* trap port */
+        r.x.dx = (unsigned short)(g_data + i);
+        if (qpi_call(&r) != 0) {
+            if (i) {                               /* roll the first one back */
+                memset(&r, 0, sizeof r);
+                r.x.ax = 0x1A0A; r.x.dx = g_data;
+                qpi_call(&r);
+            }
+            memset(&r, 0, sizeof r);               /* restore the old handler */
+            r.x.ax = 0x1A07;
+            r.x.es = oldseg;
+            r.x.di = oldofs;
+            qpi_call(&r);
+            __dpmi_free_dos_memory(blksel);
+            outs("V86 trap: QPI trap-port failed - V86 side skipped.\r\n");
+            return 0;
+        }
+    }
+    return 1;
+}
+
 /* fn 9: trap CLI (BL=0).  CX:EDX = FAR32 handler.  CF set = the resident
  * HDPMI has no CLI/STI trap support (very old build). */
 static int hdpmi_set_cli(void (*handler)(void))
@@ -539,10 +694,11 @@ static void uart_setdiv(unsigned base, unsigned div)
 
 int main(int argc, char **argv)
 {
-    unsigned long handle;
+    unsigned long handle = 0;
     unsigned long psp;
     unsigned div = 0;
-    int nocli = 0;
+    int nocli = 0, nopm = 0, norm = 0;
+    int hdpmi_ok, qpi_ok, pm_armed = 0, rm_armed = 0;
     __dpmi_regs r;
     int i;
 
@@ -564,23 +720,32 @@ int main(int argc, char **argv)
         else if (keymatch(a, "NOTX"))  g_notx = 1;
         else if (keymatch(a, "NOCLI")) nocli = 1;
         else if (keymatch(a, "NOBC"))  g_nobc = 1;
+        else if (keymatch(a, "NOPM"))  nopm = 1;
+        else if (keymatch(a, "NORM"))  norm = 1;
         else if (keymatch(a, "IF"))    g_forceif = 1;
         else {
-            outs("MPUSHIMP - protected-mode MPU-401 facade over a serial UART\r\n"
+            outs("MPUSHIMP 0.3 - MPU-401 facade over a serial UART, both worlds:\r\n"
+                 "V86 (real-mode) games via QPI + DPMI/DOS4GW games via HDPMI32i.\r\n"
                  "  MPUSHIMP [/UART=250] [/MPU=330] [/DIV=n] [/NOTX] [/NOCLI]\r\n"
+                 "  /NORM  = skip the V86 (QPI) side   /NOPM = skip the PM side\r\n"
                  "  /NOTX  = diagnostic: answer the handshake, send no MIDI\r\n"
                  "  /NOCLI = diagnostic: skip the DOS4G PUSHFD/CLI/POPFD heal\r\n"
                  "  /NOBC  = diagnostic: no all-notes-off broadcast on reset\r\n"
                  "  /IF    = diagnostic: force interrupts on at trap return\r\n"
-                 "Installs the trap and stays resident; then start games normally.\r\n"
-                 "Needs HDPMI32i resident (-r -x) and the UART already up.\r\n");
+                 "Installs its traps and stays resident; start games normally.\r\n"
+                 "Hosts: HDPMI32i -r -x (PM); JEMM+QPIEMU / QEMM / VDPMI (V86).\r\n"
+                 "Either alone is fine - each side reports separately.\r\n");
             return 0;
         }
     }
     g_stat = g_data + 1;
 
-    if (!get_hdpmi()) {
-        outs("MPUSHIMP: HDPMI vendor API not found - is HDPMI32i loaded (-r -x)?\r\n");
+    hdpmi_ok = nopm ? 0 : get_hdpmi();
+    qpi_ok   = norm ? 0 : find_qpi();
+    if (!hdpmi_ok && !qpi_ok) {
+        outs("MPUSHIMP: no trap host at all.\r\n"
+             "  PM side needs HDPMI32i resident (-r -x);\r\n"
+             "  V86 side needs Jemm+QPIEMU, QEMM or VDPMI.\r\n");
         return 2;
     }
     __asm__ __volatile__("movw %%ds, %0" : "=m"(g_ds_st));
@@ -606,31 +771,50 @@ int main(int argc, char **argv)
         __dpmi_lock_linear_region(&m);
     }
 
-    hdpmi_set_context_mode(0);
-    handle = hdpmi_install(g_data, 2);          /* the two MPU ports */
-    if (!handle) {
-        outs("MPUSHIMP: HDPMI trap install failed (ports already trapped?).\r\n");
-        return 4;
-    }
-
-    outs("MPUSHIMP: MPU-401 ");
+    outs("MPUSHIMP 0.3: MPU-401 ");
     outhex(g_data, 3);
     outs("/");
     outhex(g_stat, 3);
     outs(" -> UART ");
     outhex(g_uart, 3);
-    outs(", trap ");
-    outhex((unsigned)handle, 8);
     if (g_notx) outs(" [NOTX: no MIDI will be sent]");
     if (g_nobc) outs(" [NOBC: no reset broadcast]");
     if (g_forceif) outs(" [IF: forcing interrupts on]");
-    if (nocli)
-        outs(" [NOCLI]");
-    else if (hdpmi_set_cli(&mpushim_cli_handler))
-        outs(" [DOS4G CLI fix]");
-    else
-        outs(" [no fn9: CLI fix unavailable]");
-    outs("\r\nMPUSHIMP: resident - start your game normally.\r\n");
+    outs("\r\n");
+
+    if (hdpmi_ok) {
+        hdpmi_set_context_mode(0);
+        handle = hdpmi_install(g_data, 2);      /* the two MPU ports */
+        if (!handle) {
+            outs("PM trap: HDPMI install failed (ports already trapped?).\r\n");
+        } else {
+            pm_armed = 1;
+            outs("PM trap: HDPMI handle ");
+            outhex((unsigned)handle, 8);
+            if (nocli)
+                outs(" [NOCLI]");
+            else if (hdpmi_set_cli(&mpushim_cli_handler))
+                outs(" [DOS4G CLI fix]");
+            else
+                outs(" [no fn9: CLI fix unavailable]");
+            outs("\r\n");
+        }
+    } else if (!nopm) {
+        outs("PM trap: HDPMI32i not found - DPMI/DOS4GW games NOT covered.\r\n");
+    }
+
+    if (qpi_ok) {
+        rm_armed = rm_install();
+        if (rm_armed) outs("V86 trap: QPI armed - real-mode games covered.\r\n");
+    } else if (!norm) {
+        outs("V86 trap: no QPI host - real-mode games NOT covered.\r\n");
+    }
+
+    if (!pm_armed && !rm_armed) {
+        outs("MPUSHIMP: nothing armed - not going resident.\r\n");
+        return 4;
+    }
+    outs("MPUSHIMP: resident - start your game normally.\r\n");
 
     /* Go resident, the vsbhda way: give DOS back everything but the PSP.
      * Our resident half is pure protected-mode - it never uses the stub,
@@ -652,7 +836,8 @@ int main(int argc, char **argv)
     __asm__ __volatile__(       /* stale selectors must not linger in fs/gs */
         "pushl $0 \n popl %%gs \n pushl $0 \n popl %%fs" ::: "memory");
     r.x.ax = 0x3100;
-    r.x.dx = 0x10;              /* keep only the PSP in conventional memory */
+    r.x.dx = 0x10;              /* keep only the PSP: the V86 blob lives in
+                                 * its own DOS block, owned by this client */
     r.x.ss = r.x.sp = 0;
     __dpmi_simulate_real_mode_interrupt(0x21, &r);
     return 0;                          /* not reached */

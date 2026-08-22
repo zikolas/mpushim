@@ -4,3 +4,5 @@
 *.obj
 *.map
 *.dis
+MPUSHIMR.BIN
+mpushimr.h
