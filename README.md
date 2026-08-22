@@ -56,9 +56,37 @@ Not covered yet, all planned:
 
 - **32-bit protected-mode games** (DOS4GW/DPMI titles doing MPU I/O from
   ring-3 — the General MIDI generation: Duke3D, Descent, Warcraft II, ...):
-  needs a second trap registration with the protected-mode host
-  (HDPMI32i). Planned as v0.2 — with a GM module on the DIN this opens the
-  whole DOS4GW library.
+  handled by **MPUSHIMP.EXE**, the protected-mode companion in this repo.
+  It registers the MPU ports with HDPMI32i's documented I/O-trap API, runs
+  the same facade, and goes resident; games are then started normally:
+
+  ```
+  HDPMI32I -r -x
+  MPUSHIMP /UART=250
+  DUKE3D.EXE
+  ```
+
+  (`GOMIDIPM.BAT` runs the whole stack.) **Bench-proven on the IBM PC110
+  with a Yamaha QY70 GM module on the DIN: Duke Nukem 3D, DOOM and DOOM II
+  all play their General MIDI scores through the facade.** Getting there
+  took finding two **host-interaction bugs** in the HDPMI source: DJGPP's
+  startup leaves the machine-global CR0.EM FPU state altered under HDPMI,
+  which broke DOS/4GW's FPU emulator for every program started afterwards
+  (Duke3D's "exception 07h" crash — repaired at startup), and the DOS/4G
+  `PUSHFD/CLI...POPFD` critical sections latch interrupts off forever at
+  IOPL 0, since a ring-3 POPFD cannot restore IF (DOOM's hard wedge —
+  healed by a CLI trap handler registered through HDPMI's vendor fn 9).
+  Plus two MIDI data-path laws learned on the bench: never drop a MIDI
+  byte (the transmit path waits a bounded byte-time, FIFOs off so THRE
+  means room-for-one), and the status byte must always report write-ready
+  (DMX-class drivers skip bytes if it ever says busy).  The facade also
+  broadcasts All-Notes-Off on all 16 channels when it receives the MPU
+  RESET command, because real MPU-401 silicon does (`/NOBC` disables it) —
+  note this is CC 123, which LA-era Rolands (MT-32/CM-32L) ignore, so a
+  GM score can still leave a note ringing on those synths at song
+  changes; use a true GM module for GM titles.
+  (MPUSHIM.COM and MPUSHIMP coexist: real-mode games via the resident QPI
+  trap, protected-mode games via this one.)
 - **16-bit protected-mode games** (the 16-bit DPMI client class —
   Tyrian, for one): DPMI hosts handle 16- and 32-bit clients separately,
   so this is its own registration against HDPMI16i. Also on the roadmap.
@@ -94,6 +122,15 @@ MPUSHIM [/UART=250] [/MPU=330] [/DIV=24] [/U] [/?]
              omit to leave the UART exactly as the enabler set it
   /U         unload a resident MPUSHIM
   /?         help
+```
+
+```
+MPUSHIMP [/UART=250] [/MPU=330] [/DIV=n] [/NOTX] [/NOCLI] [/IF]
+  /UART, /MPU, /DIV as above.  Needs HDPMI32i resident (-r -x); installs
+  the protected-mode trap and stays resident (remove = reboot).
+  /NOTX      diagnostic: answer the MPU handshake, send no MIDI
+  /NOCLI     diagnostic: skip the DOS/4G PUSHFD/CLI/POPFD interrupt heal
+  /IF        diagnostic: force interrupts on at every trap return
 ```
 
 ## Bench recipe (EXP G3 on the IBM PC110) — as proven
@@ -137,10 +174,11 @@ sustains that; a paced-output option can be added if it ever matters.
 ## Build
 
 ```
-nasm -f bin MPUSHIM.ASM -o MPUSHIM.COM
+nasm -f bin MPUSHIM.ASM -o MPUSHIM.COM     (real-mode TSR)
+./build-pm.sh                              (MPUSHIMP.EXE, DJGPP in docker)
 ```
 
-(Builds byte-identical with the on-box NASM at `C:\NASM`.)
+(The .COM builds byte-identical with the on-box NASM at `C:\NASM`.)
 
 ## Clean-room provenance
 
@@ -148,8 +186,16 @@ The QPI port-trap ABI used here is the public QEMM programming interface
 (entry via `int 67h AX=3F00h` or `int 2Fh AX=1684h`; far-call functions
 `1A06h`/`1A07h` get/set trap handler, `1A08h` status, `1A09h`/`1A0Ah`
 trap/untrap a port; real-mode handler contract `DX`=port, `CL` bit 2 = OUT,
-`AL` = value). The MPU-401 UART-mode protocol and the 16550 register model
-are published hardware standards. No third-party source was copied.
+`AL` = value). The protected-mode side uses the HDPMI vendor API exactly
+as documented in HX's published `HDPMIAPI.TXT` (int 31h `AX=168Ah`
+"HDPMI"; fn 5 context mode; fn 6/7 install/remove port traps; fn 9
+CLI/STI trap; the error-code bit layout and the advance-EIP handler
+obligation). The MPU-401 UART-mode protocol and the 16550 register model
+are published hardware standards. No third-party source was copied. One
+honesty note: keying the CLI heal on the preceding-`PUSHFD` idiom is the
+same approach vsbhda (GPL) ships for the identical DOS/4G problem; the
+implementation here was written independently against the documented fn-9
+ABI and the Intel-documented IOPL-0 `POPFD` behaviour.
 
 ## License
 
