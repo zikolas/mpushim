@@ -4,15 +4,26 @@ A tiny resident DOS tool that lets **games** talk to a bare serial-UART MIDI
 interface (like the one hiding inside the EXP GAME/MIDI G3 PC Card) as though
 it were an **MPU-401 at 330h**.
 
-**Status: bench-proven, two backends.** Both on an IBM PC110 (486SX):
+**Status: bench-proven, both eras, two backends**, all on an IBM PC110
+(486SX). `MPUSHIMP.EXE` is the one to use — **a single binary that covers
+both trap worlds**: real-mode (V86) games through the QPI port-trap
+interface, and 32-bit DPMI/DOS4GW games through HDPMI32i. Either host
+alone is enough; each side installs and reports separately.
 
-- **EXP GAME/MIDI G3 PC Card** (its hidden UART at 250h) → Roland CM-32L:
-  DOSMid in real MPU mode (`/mpu=330`) detects and plays through the
-  facade, and **The Secret of Monkey Island's Roland MT-32 music works** —
-  the same setup that hard-wedges without MPUSHIM.
-- **serdashop MPU-232** serial-MIDI dongle on a plain COM port: DOSMid
-  `/mpu=330` plays to an external synth on a machine with **no sound card
-  and no free slot** — game MIDI from nothing but a serial port.
+- **Real-mode era** — *The Secret of Monkey Island*'s Roland MT-32 music
+  plays through the facade on the EXP GAME/MIDI G3 (its hidden UART at
+  250h), the same setup that hard-wedges without MPUSHIM. DOSMid in real
+  MPU mode (`/mpu=330`) detects and plays too.
+- **DOS4GW / General MIDI era** — **Duke Nukem 3D, DOOM and DOOM II** play
+  their GM scores through the facade to a Yamaha QY70.
+- **serdashop MPU-232** serial-MIDI dongle on a plain COM port: game MIDI
+  on a machine with **no sound card and no free slot** — nothing but a
+  serial port.
+
+Pair the synth to the score: a **GM module** (QY70 et al.) for the
+DOS4GW/General MIDI catalogue, a **CM-32L/MT-32** for the Roland-native
+titles. `MPUSHIM.COM`, the standalone 1.6 KB real-mode TSR, remains in the
+repo for QPI-only stacks with no DPMI host at all.
 
 (DOSMid note: with Jemm loaded dynamically from the prompt, add `/noxms`.)
 
@@ -47,53 +58,52 @@ implemented by QEMM386, Jemm's QPIEMU, and crazii's VDPMI alike — so it is
 
 ## Coverage and roadmap
 
-QPI's real-mode trap covers **V86-mode (real-mode) programs** — which is
-precisely the MPU-401 era: SCUMM/iMUSE, Sierra SCI, Miles-driver games. That
-is what v0.1 serves, in **UART mode** (the mode virtually everything after
-~1990 uses).
+Both **UART-mode** worlds are covered, by the one `MPUSHIMP.EXE`:
 
-Not covered yet, all planned:
-
+- **Real-mode (V86) games** — the MPU-401 era proper: SCUMM/iMUSE, Sierra
+  SCI, Miles-driver titles. A 199-byte real-mode core (`MPUSHIMR.ASM`,
+  embedded in the EXE) is planted in a DOS block and registered with the
+  QPI port-trap host, so a V86 status poll is answered in real mode with
+  no mode switch at all.
 - **32-bit protected-mode games** (DOS4GW/DPMI titles doing MPU I/O from
-  ring-3 — the General MIDI generation: Duke3D, Descent, Warcraft II, ...):
-  handled by **MPUSHIMP.EXE**, the protected-mode companion in this repo.
-  It registers the MPU ports with HDPMI32i's documented I/O-trap API, runs
-  the same facade, and goes resident; games are then started normally:
+  ring-3 — the General MIDI generation: Duke3D, DOOM, Descent, Warcraft
+  II, ...), through HDPMI32i's documented I/O-trap API.
 
-  ```
-  HDPMI32I -r -x
-  MPUSHIMP /UART=250
-  DUKE3D.EXE
-  ```
+```
+MPUSHIMP /UART=250      :: arms whichever hosts are present
+DUKE3D.EXE              :: then start games normally
+```
 
-  (`GOMIDIPM.BAT` runs the whole stack.) **Bench-proven on the IBM PC110
-  with a Yamaha QY70 GM module on the DIN: Duke Nukem 3D, DOOM and DOOM II
-  all play their General MIDI scores through the facade.** Getting there
-  took finding two **host-interaction bugs** in the HDPMI source: DJGPP's
-  startup leaves the machine-global CR0.EM FPU state altered under HDPMI,
-  which broke DOS/4GW's FPU emulator for every program started afterwards
-  (Duke3D's "exception 07h" crash — repaired at startup), and the DOS/4G
-  `PUSHFD/CLI...POPFD` critical sections latch interrupts off forever at
-  IOPL 0, since a ring-3 POPFD cannot restore IF (DOOM's hard wedge —
-  healed by a CLI trap handler registered through HDPMI's vendor fn 9).
-  Plus two MIDI data-path laws learned on the bench: never drop a MIDI
-  byte (the transmit path waits a bounded byte-time, FIFOs off so THRE
-  means room-for-one), and the status byte must always report write-ready
-  (DMX-class drivers skip bytes if it ever says busy).  The facade also
-  broadcasts All-Notes-Off on all 16 channels when it receives the MPU
-  RESET command, because real MPU-401 silicon does (`/NOBC` disables it) —
-  note this is CC 123, which LA-era Rolands (MT-32/CM-32L) ignore, so a
-  GM score can still leave a note ringing on those synths at song
-  changes; use a true GM module for GM titles.
-  (MPUSHIM.COM and MPUSHIMP coexist: real-mode games via the resident QPI
-  trap, protected-mode games via this one.)
+`GOMIDIALL.BAT` brings up the whole stack (JEMM+QPIEMU for V86, HDPMI32i
+for PM, then the shim); `GOMIDIPM.BAT` is the PM-only variant. **Bench-
+proven on the IBM PC110 with a Yamaha QY70 GM module on the DIN: Duke
+Nukem 3D, DOOM and DOOM II all play their General MIDI scores through the
+facade.** Getting there took finding two **host-interaction bugs** in the
+HDPMI source: DJGPP's startup leaves the machine-global CR0.EM FPU state
+altered under HDPMI, which broke DOS/4GW's FPU emulator for every program
+started afterwards (Duke3D's "exception 07h" crash — repaired at
+startup), and the DOS/4G `PUSHFD/CLI...POPFD` critical sections latch
+interrupts off forever at IOPL 0, since a ring-3 POPFD cannot restore IF
+(DOOM's hard wedge — healed by a CLI trap handler registered through
+HDPMI's vendor fn 9). Plus two MIDI data-path laws learned on the bench:
+never drop a MIDI byte (the transmit path waits a bounded byte-time,
+FIFOs off so THRE means room-for-one), and the status byte must always
+report write-ready (DMX-class drivers skip bytes if it ever says busy).
+The facade also broadcasts All-Notes-Off on all 16 channels when it
+receives the MPU RESET command, because real MPU-401 silicon does
+(`/NOBC` disables it) — note this is CC 123, which LA-era Rolands
+(MT-32/CM-32L) ignore, so a GM score can still leave a note ringing on
+those synths at song changes; use a true GM module for GM titles.
+
+Not covered yet, both planned:
+
 - **16-bit protected-mode games** (the 16-bit DPMI client class —
   Tyrian, for one): DPMI hosts handle 16- and 32-bit clients separately,
   so this is its own registration against HDPMI16i. Also on the roadmap.
 - **Intelligent mode** (the MPU-401's onboard 8-track sequencer, used by
   early Sierra AGI/early-SCI titles ~1986-1990): needs a command state
   machine, a timer-driven track engine, and virtual-IRQ delivery to the
-  game. Planned as v0.3.
+  game. Planned as v0.4.
 
 (On Pentium-class machines VDPMI covers V86 plus both 16- and 32-bit DPMI
 clients in one host — the 486 fleet is where the per-host registrations
@@ -102,35 +112,45 @@ matter.)
 VCPI-only extenders remain out of scope (the usual residue every solution
 in this space shares).
 
-## Host requirement — pick the one your machine can run
+## Host requirements
 
-MPUSHIM needs a QPI provider resident. Two options, same result:
+Each world needs its trap host, and either alone is fine — the shim arms
+what it finds and says what it could not:
 
-- **JEMM386 + QPIEMU** — runs on any 386+; the right choice on older/slower
-  hardware (e.g. the 486-class IBM PC110, where MPU-era games run at the
-  correct speed).
-- **VDPMI** — a modern DPMI server + V86 monitor in one. Cleaner, but it
-  **requires a Pentium and 64 MB RAM**, so it is for faster boxes only.
+- **V86 (real-mode) side — a QPI provider.** **JEMM386 + QPIEMU** runs on
+  any 386+ and is the right choice on older hardware (e.g. the 486-class
+  IBM PC110, where MPU-era games run at the correct speed). **VDPMI** is a
+  modern DPMI server + V86 monitor in one, but **requires a Pentium and
+  64 MB RAM**, so it is for faster boxes only.
+- **Protected-mode side — `HDPMI32I -r -x`**, whose IOPL-0 client
+  execution is what makes ring-3 I/O trapping possible.
+
+A dynamically loaded JEMM claims the extended memory, so give HDPMI32i
+`-v` (take memory via VCPI) when both load from the prompt — the recipe
+`GOMIDIALL.BAT` uses. With JEMM in `CONFIG.SYS` instead, the `-v` is
+unnecessary. Never `JEMM386 UNLOAD` with this stack on top of it.
 
 ## Usage
 
 ```
-MPUSHIM [/UART=250] [/MPU=330] [/DIV=24] [/U] [/?]
+MPUSHIMP [/UART=250] [/MPU=330] [/DIV=n] [/NORM] [/NOPM]
+         [/NOTX] [/NOCLI] [/NOBC] [/IF]
   /UART=hex  serial UART base I/O port (default 250h)
   /MPU=hex   MPU-401 base the game expects (default 330h; status = base+1)
   /DIV=dec   (re)program the UART divisor for 31250 baud (G3 wants 24);
              omit to leave the UART exactly as the enabler set it
-  /U         unload a resident MPUSHIM
-  /?         help
-```
-
-```
-MPUSHIMP [/UART=250] [/MPU=330] [/DIV=n] [/NOTX] [/NOCLI] [/IF]
-  /UART, /MPU, /DIV as above.  Needs HDPMI32i resident (-r -x); installs
-  the protected-mode trap and stays resident (remove = reboot).
+  /NORM      skip the V86 (QPI) side      /NOPM  skip the protected-mode side
   /NOTX      diagnostic: answer the MPU handshake, send no MIDI
   /NOCLI     diagnostic: skip the DOS/4G PUSHFD/CLI/POPFD interrupt heal
+  /NOBC      diagnostic: no all-notes-off broadcast on MPU reset
   /IF        diagnostic: force interrupts on at every trap return
+```
+
+Installs its traps and stays resident (remove = reboot); start games
+normally afterwards.
+
+```
+MPUSHIM [/UART=250] [/MPU=330] [/DIV=24] [/U] [/?]   :: standalone RM .COM
 ```
 
 ## Bench recipe (EXP G3 on the IBM PC110) — as proven
@@ -140,18 +160,20 @@ JEMM386 LOAD NOEMS X=DC00-DFFF   :: V86 monitor; exclude the card window
                                  :: (match the X= to your enabler's /W)
 EXPG3GO /PCIC /W=DC00            :: card up, UART native at 250h (NO /MPU:
                                  :: presenting 330h is MPUSHIM's job now)
-JLOAD QPIEMU.DLL                 :: QPI port-trap provider
-MPUSHIM                          :: trap 330h/331h -> UART at 250h
+JLOAD QPIEMU.DLL                 :: QPI port-trap provider (V86 side)
+HDPMI32I -r -x -v                :: DPMI host with I/O trapping (PM side)
+MPUSHIMP /UART=250               :: trap 330h/331h -> UART at 250h, both worlds
 ```
 
-Quick smoke test: `DOSMID /mpu=330 /noxms CANYON.MID` — if that plays, the
-whole facade works. Then start the game and choose **Roland MPU-401 /
-MT-32** music.
+Quick smoke tests: `DOSMID /mpu=330 /noxms CANYON.MID` exercises the
+real-mode path, `PMPOKE.EXE` the protected-mode one. Then start the game
+and choose **Roland MPU-401 / MT-32** or **General MIDI** music at 330.
 
-`GOMIDI.BAT` in this repo is that sequence ready to run; `GOMIDI232.BAT`
-is the MPU-232 variant. On a Pentium-class machine the JEMM386+JLOAD pair
-can be replaced by a single `DEVICE=VDPMI.EXE` in CONFIG.SYS (after
-HIMEMX).
+`GOMIDIALL.BAT` in this repo is that sequence ready to run;
+`GOMIDIPM.BAT` is the protected-mode-only subset, `GOMIDI.BAT` the
+real-mode-only one, and `GOMIDI232.BAT` the MPU-232 variant. On a
+Pentium-class machine the JEMM386+JLOAD pair can be replaced by a single
+`DEVICE=VDPMI.EXE` in CONFIG.SYS (after HIMEMX).
 
 ## Serial-port dongles: the MPU-232 (tested)
 
@@ -162,7 +184,7 @@ serdashop **MPU-232** on COM1 (DIP switches all OFF = binary mode, 38400):
 ```
 JEMM386 LOAD NOEMS
 JLOAD QPIEMU.DLL
-MPUSHIM /UART=3F8 /DIV=3
+MPUSHIMP /UART=3F8 /DIV=3
 ```
 
 (`/DIV=3` on a standard 1.8432 MHz COM UART = 38400 baud; the dongle
@@ -174,11 +196,14 @@ sustains that; a paced-output option can be added if it ever matters.
 ## Build
 
 ```
-nasm -f bin MPUSHIM.ASM -o MPUSHIM.COM     (real-mode TSR)
-./build-pm.sh                              (MPUSHIMP.EXE, DJGPP in docker)
+./build-pm.sh                              (MPUSHIMP.EXE — nasm + DJGPP in docker)
+nasm -f bin MPUSHIM.ASM -o MPUSHIM.COM     (the standalone real-mode TSR)
 ```
 
-(The .COM builds byte-identical with the on-box NASM at `C:\NASM`.)
+`build-pm.sh` assembles `MPUSHIMR.ASM` flat with nasm, embeds it as a C
+byte array (`xxd -i`), then compiles `MPUSHIMP.C` with the DJGPP cross
+toolchain in a container. (The .COM builds byte-identical with the on-box
+NASM at `C:\NASM`.)
 
 ## Clean-room provenance
 
