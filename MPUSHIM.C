@@ -1,4 +1,4 @@
-/* MPUSHIMP 0.3 - the WHOLE MPU-401 (UART mode) facade in one binary: an
+/* MPUSHIM 0.3 - the WHOLE MPU-401 (UART mode) facade in one binary: an
  * MPU-401 at 330h over a plain serial UART (the EXP GAME/MIDI G3's hidden
  * UART at 250h, or a COM port + an MPU-232 dongle), for BOTH worlds:
  *
@@ -14,10 +14,10 @@
  * facades behave identically: correct MPU-401 UART-mode status (always
  * write-ready), the 0FEh reset/UART-mode ACK, All-Notes-Off broadcast on
  * reset, and MIDI data paced onto the real UART, never dropped.  This
- * supersedes the separate MPUSHIM.COM + MPUSHIMP pair (the standalone
+ * supersedes the separate MPUSHIM.COM + MPUSHIMP.EXE pair (the standalone
  * .COM remains in the repo for QPI-only stacks without any DPMI host).
  *
- *     MPUSHIMP [/UART=250] [/MPU=330] [/DIV=n] [/NORM] [/NOPM]
+ *     MPUSHIM [/UART=250] [/MPU=330] [/DIV=n] [/NORM] [/NOPM]
  *              [/NOTX] [/NOCLI] [/NOBC] [/IF]
  *
  * It installs its traps and stays resident; games are then started
@@ -87,7 +87,7 @@
  * the TSR), patched, and registered with the QPI port-trap host, so ONE
  * binary covers both worlds: V86 (real-mode) games through QPI and ring-3
  * DPMI games through HDPMI.  Each world runs its own facade state, exactly
- * like the previously separate MPUSHIM.COM + MPUSHIMP pair proved out. */
+ * like the previously separate .COM + .EXE pair proved out. */
 #include "mpushimr.h"
 #define RBLOB_UART   4    /* state-header offsets, must match MPUSHIMR.ASM */
 #define RBLOB_DATA   6
@@ -724,9 +724,9 @@ int main(int argc, char **argv)
         else if (keymatch(a, "NORM"))  norm = 1;
         else if (keymatch(a, "IF"))    g_forceif = 1;
         else {
-            outs("MPUSHIMP 0.3 - MPU-401 facade over a serial UART, both worlds:\r\n"
+            outs("MPUSHIM 0.3 - MPU-401 facade over a serial UART, both worlds:\r\n"
                  "V86 (real-mode) games via QPI + DPMI/DOS4GW games via HDPMI32i.\r\n"
-                 "  MPUSHIMP [/UART=250] [/MPU=330] [/DIV=n] [/NOTX] [/NOCLI]\r\n"
+                 "  MPUSHIM [/UART=250] [/MPU=330] [/DIV=n] [/NOTX] [/NOCLI]\r\n"
                  "  /NORM  = skip the V86 (QPI) side   /NOPM = skip the PM side\r\n"
                  "  /NOTX  = diagnostic: answer the handshake, send no MIDI\r\n"
                  "  /NOCLI = diagnostic: skip the DOS4G PUSHFD/CLI/POPFD heal\r\n"
@@ -743,7 +743,7 @@ int main(int argc, char **argv)
     hdpmi_ok = nopm ? 0 : get_hdpmi();
     qpi_ok   = norm ? 0 : find_qpi();
     if (!hdpmi_ok && !qpi_ok) {
-        outs("MPUSHIMP: no trap host at all.\r\n"
+        outs("MPUSHIM: no trap host at all.\r\n"
              "  PM side needs HDPMI32i resident (-r -x);\r\n"
              "  V86 side needs Jemm+QPIEMU, QEMM or VDPMI.\r\n");
         return 2;
@@ -771,7 +771,7 @@ int main(int argc, char **argv)
         __dpmi_lock_linear_region(&m);
     }
 
-    outs("MPUSHIMP 0.3: MPU-401 ");
+    outs("MPUSHIM 0.3: MPU-401 ");
     outhex(g_data, 3);
     outs("/");
     outhex(g_stat, 3);
@@ -811,10 +811,10 @@ int main(int argc, char **argv)
     }
 
     if (!pm_armed && !rm_armed) {
-        outs("MPUSHIMP: nothing armed - not going resident.\r\n");
+        outs("MPUSHIM: nothing armed - not going resident.\r\n");
         return 4;
     }
-    outs("MPUSHIMP: resident - start your game normally.\r\n");
+    outs("MPUSHIM: resident - start your game normally.\r\n");
 
     /* Go resident, the vsbhda way: give DOS back everything but the PSP.
      * Our resident half is pure protected-mode - it never uses the stub,

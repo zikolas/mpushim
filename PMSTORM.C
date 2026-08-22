@@ -2,7 +2,7 @@
  * report how many traps per second the host sustains, in batches, so a
  * hang shows up as a batch that never completes.
  *
- * Run under a resident MPUSHIMP.  Purpose: separate "sustained protected
+ * Run under a resident MPUSHIM.  Purpose: separate "sustained protected
  * mode trapping is too slow / unstable" from "something specific to the
  * game".  MIT (c) 2026 zikolas.
  */
@@ -27,7 +27,7 @@ int main(void)
 {
     int b, i;
     unsigned long t0, t1, total = 0;
-    /* repair CR0 after DJGPP's 0E01h startup call (see MPUSHIMP.C bug 1) */
+    /* repair CR0 after DJGPP's 0E01h startup call (see MPUSHIM.C bug 1) */
     __dpmi_set_coprocessor_emulation(0);
     printf("PMSTORM: %d batches x %d writes+reads to %03X/%03X\n",
            BATCHES, BATCH, DATA, STAT);

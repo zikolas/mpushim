@@ -1,9 +1,9 @@
 ;==========================================================================
-;  MPUSHIMR - the real-mode (V86) resident core of the unified MPUSHIMP.
+;  MPUSHIMR - the real-mode (V86) resident core of the unified MPUSHIM.
 ;
-;  Assembled flat (org 0) and embedded in MPUSHIMP.EXE as a byte blob
+;  Assembled flat (org 0) and embedded in MPUSHIM.EXE as a byte blob
 ;  (build-pm.sh: nasm -f bin -> xxd -i -> mpushimr.h).  At install time
-;  MPUSHIMP copies it into a paragraph-aligned DOS block of its own (the
+;  MPUSHIM copies it into a paragraph-aligned DOS block of its own (the
 ;  block belongs to the resident client, so it survives the TSR), patches
 ;  the state header, and registers the handler with the QPI port-trap
 ;  host (QEMM / Jemm's QPIEMU / VDPMI) as segment = block, offset =
@@ -20,7 +20,7 @@
 ;  with AL = the byte handed back for an IN.  Runs in the guest's V86
 ;  context with unknown DS/SS; preserves everything except AL on IN.
 ;
-;  (C) 2026 zikolas, MIT.  Clean-room - see MPUSHIM.ASM / MPUSHIMP.C.
+;  (C) 2026 zikolas, MIT.  Clean-room - see MPUSHIM.ASM / MPUSHIM.C.
 ;==========================================================================
         cpu  386
         org  0

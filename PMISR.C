@@ -3,7 +3,7 @@
  * Every other test so far drives the trap from the main thread and passes;
  * this isolates "trapping from an ISR context" as the remaining difference.
  *
- * Run under a resident MPUSHIMP.  It hooks the PM timer vector, writes a
+ * Run under a resident MPUSHIM.  It hooks the PM timer vector, writes a
  * MIDI-ish byte + polls status on every tick for ~10 seconds, prints a live
  * count, then unhooks.  MIT (c) 2026 zikolas.
  */
@@ -39,7 +39,7 @@ static unsigned long ticks(void) { return _farpeekl(_dos_ds, 0x46c); }
 int main(int argc, char **argv)
 {
     unsigned long t0, last = 0;
-    /* repair CR0 after DJGPP's 0E01h startup call (see MPUSHIMP.C bug 1) */
+    /* repair CR0 after DJGPP's 0E01h startup call (see MPUSHIM.C bug 1) */
     __dpmi_set_coprocessor_emulation(0);
     if (argc > 1) {
         int n = 0; const char *p = argv[1];

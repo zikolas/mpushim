@@ -14,7 +14,7 @@ int main(void)
     __dpmi_meminfo m;
     int i, n = 0;
     unsigned long mb = 8;
-    /* repair CR0 after DJGPP's 0E01h startup call (see MPUSHIMP.C bug 1) */
+    /* repair CR0 after DJGPP's 0E01h startup call (see MPUSHIM.C bug 1) */
     __dpmi_set_coprocessor_emulation(0);
     m.address = 0;
     m.size = mb * 1024UL * 1024UL;

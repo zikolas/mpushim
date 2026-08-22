@@ -1,8 +1,8 @@
 /* PMPOKE - minimal 32-bit DPMI client that exercises an MPU-401 at 330h
  * exactly the way a game's init does, one step at a time, with prints.
- * Run it under MPUSHIMP to verify the protected-mode trap end to end:
+ * Run it under MPUSHIM to verify the protected-mode trap end to end:
  *
- *     MPUSHIMP /UART=250 PMPOKE.EXE
+ *     MPUSHIM /UART=250 PMPOKE.EXE
  *
  * Expected with the facade working: status reads 80, reset ACK FE arrives,
  * UART-mode ACK FE arrives, note-on bytes accepted (and heard, ch2).

@@ -5,7 +5,7 @@ interface (like the one hiding inside the EXP GAME/MIDI G3 PC Card) as though
 it were an **MPU-401 at 330h**.
 
 **Status: bench-proven, both eras, two backends**, all on an IBM PC110
-(486SX). `MPUSHIMP.EXE` is the one to use — **a single binary that covers
+(486SX). `MPUSHIM.EXE` is the one to use — **a single binary that covers
 both trap worlds**: real-mode (V86) games through the QPI port-trap
 interface, and 32-bit DPMI/DOS4GW games through HDPMI32i. Either host
 alone is enough; each side installs and reports separately.
@@ -58,7 +58,7 @@ implemented by QEMM386, Jemm's QPIEMU, and crazii's VDPMI alike — so it is
 
 ## Coverage and roadmap
 
-Both **UART-mode** worlds are covered, by the one `MPUSHIMP.EXE`:
+Both **UART-mode** worlds are covered, by the one `MPUSHIM.EXE`:
 
 - **Real-mode (V86) games** — the MPU-401 era proper: SCUMM/iMUSE, Sierra
   SCI, Miles-driver titles. A 199-byte real-mode core (`MPUSHIMR.ASM`,
@@ -70,12 +70,12 @@ Both **UART-mode** worlds are covered, by the one `MPUSHIMP.EXE`:
   II, ...), through HDPMI32i's documented I/O-trap API.
 
 ```
-MPUSHIMP /UART=250      :: arms whichever hosts are present
+MPUSHIM /UART=250       :: arms whichever hosts are present
 DUKE3D.EXE              :: then start games normally
 ```
 
-`GOMIDIALL.BAT` brings up the whole stack (JEMM+QPIEMU for V86, HDPMI32i
-for PM, then the shim); `GOMIDIPM.BAT` is the PM-only variant. **Bench-
+`GOALL.BAT` brings up the whole stack (JEMM+QPIEMU for V86, HDPMI32i
+for PM, then the shim); `GOPM.BAT` is the PM-only variant. **Bench-
 proven on the IBM PC110 with a Yamaha QY70 GM module on the DIN: Duke
 Nukem 3D, DOOM and DOOM II all play their General MIDI scores through the
 facade.** Getting there took finding two **host-interaction bugs** in the
@@ -127,13 +127,13 @@ what it finds and says what it could not:
 
 A dynamically loaded JEMM claims the extended memory, so give HDPMI32i
 `-v` (take memory via VCPI) when both load from the prompt — the recipe
-`GOMIDIALL.BAT` uses. With JEMM in `CONFIG.SYS` instead, the `-v` is
+`GOALL.BAT` uses. With JEMM in `CONFIG.SYS` instead, the `-v` is
 unnecessary. Never `JEMM386 UNLOAD` with this stack on top of it.
 
 ## Usage
 
 ```
-MPUSHIMP [/UART=250] [/MPU=330] [/DIV=n] [/NORM] [/NOPM]
+MPUSHIM [/UART=250] [/MPU=330] [/DIV=n] [/NORM] [/NOPM]
          [/NOTX] [/NOCLI] [/NOBC] [/IF]
   /UART=hex  serial UART base I/O port (default 250h)
   /MPU=hex   MPU-401 base the game expects (default 330h; status = base+1)
@@ -150,7 +150,7 @@ Installs its traps and stays resident (remove = reboot); start games
 normally afterwards.
 
 ```
-MPUSHIM [/UART=250] [/MPU=330] [/DIV=24] [/U] [/?]   :: standalone RM .COM
+MPUSHIM.COM [/UART=250] [/MPU=330] [/DIV=24] [/U] [/?]  :: standalone RM TSR
 ```
 
 ## Bench recipe (EXP G3 on the IBM PC110) — as proven
@@ -162,16 +162,16 @@ EXPG3GO /PCIC /W=DC00            :: card up, UART native at 250h (NO /MPU:
                                  :: presenting 330h is MPUSHIM's job now)
 JLOAD QPIEMU.DLL                 :: QPI port-trap provider (V86 side)
 HDPMI32I -r -x -v                :: DPMI host with I/O trapping (PM side)
-MPUSHIMP /UART=250               :: trap 330h/331h -> UART at 250h, both worlds
+MPUSHIM /UART=250               :: trap 330h/331h -> UART at 250h, both worlds
 ```
 
 Quick smoke tests: `DOSMID /mpu=330 /noxms CANYON.MID` exercises the
 real-mode path, `PMPOKE.EXE` the protected-mode one. Then start the game
 and choose **Roland MPU-401 / MT-32** or **General MIDI** music at 330.
 
-`GOMIDIALL.BAT` in this repo is that sequence ready to run;
-`GOMIDIPM.BAT` is the protected-mode-only subset, `GOMIDI.BAT` the
-real-mode-only one, and `GOMIDI232.BAT` the MPU-232 variant. On a
+`GOALL.BAT` in this repo is that sequence ready to run;
+`GOPM.BAT` is the protected-mode-only subset, `GORM.BAT` the
+real-mode-only one, and `GO232.BAT` the MPU-232 variant. On a
 Pentium-class machine the JEMM386+JLOAD pair can be replaced by a single
 `DEVICE=VDPMI.EXE` in CONFIG.SYS (after HIMEMX).
 
@@ -184,7 +184,7 @@ serdashop **MPU-232** on COM1 (DIP switches all OFF = binary mode, 38400):
 ```
 JEMM386 LOAD NOEMS
 JLOAD QPIEMU.DLL
-MPUSHIMP /UART=3F8 /DIV=3
+MPUSHIM /UART=3F8 /DIV=3
 ```
 
 (`/DIV=3` on a standard 1.8432 MHz COM UART = 38400 baud; the dongle
@@ -196,12 +196,12 @@ sustains that; a paced-output option can be added if it ever matters.
 ## Build
 
 ```
-./build-pm.sh                              (MPUSHIMP.EXE — nasm + DJGPP in docker)
+./build-pm.sh                              (MPUSHIM.EXE — nasm + DJGPP in docker)
 nasm -f bin MPUSHIM.ASM -o MPUSHIM.COM     (the standalone real-mode TSR)
 ```
 
 `build-pm.sh` assembles `MPUSHIMR.ASM` flat with nasm, embeds it as a C
-byte array (`xxd -i`), then compiles `MPUSHIMP.C` with the DJGPP cross
+byte array (`xxd -i`), then compiles `MPUSHIM.C` with the DJGPP cross
 toolchain in a container. (The .COM builds byte-identical with the on-box
 NASM at `C:\NASM`.)
 
