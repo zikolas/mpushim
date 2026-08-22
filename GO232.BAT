@@ -1,13 +1,4 @@
 @echo off
-rem ==========================================================================
-rem  GO232.BAT - the serdashop MPU-232 serial-MIDI dongle on COM1, for a
-rem  machine with no sound card and no free slot.  DIP switches all OFF =
-rem  binary mode, 38400 baud; /DIV=3 on a standard 1.8432 MHz COM UART = 38400,
-rem  and the dongle converts to MIDI's 31250.  No card enabler needed.
-rem
-rem  NOTE: the dongle and the COMrade serial link share COM1 - either/or.
-rem  Removal: reboot.
-rem ==========================================================================
 C:\MPUSHIM\JEMM386.EXE LOAD NOEMS
 cd \MPUSHIM
 JLOAD QPIEMU.DLL

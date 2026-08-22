@@ -17,15 +17,19 @@
  * supersedes the separate MPUSHIM.COM + MPUSHIMP.EXE pair (the standalone
  * .COM remains in the repo for QPI-only stacks without any DPMI host).
  *
- *     MPUSHIM [/UART=250] [/MPU=330] [/DIV=n] [/NORM] [/NOPM]
- *              [/NOTX] [/NOCLI] [/NOBC] [/IF]
+ *     MPUSHIM [/UART=250] [/MPU=330] [/DIV=n] [/NORM] [/NOPM] [/NOCLI]
  *
  * It installs its traps and stays resident; games are then started
  * NORMALLY.  Prereqs: HDPMI32i resident (-r -x) for the PM side, a QPI
  * host for the V86 side, and the UART already brought up (EXPG3GO /PCIC
  * for the G3; a COM port needs no enabler).
  * Build: ./build-pm.sh (nasm + DJGPP).  Remove: reboot.
- * MIT (c) 2026 zikolas.
+ *
+ * Copyright (C) 2026 zikolas.  GNU General Public License v2 (see
+ * COPYING).  This program is free software; you can redistribute it
+ * and/or modify it under the terms of the GPL as published by the Free
+ * Software Foundation; either version 2 of the License, or (at your
+ * option) any later version.  It is distributed WITHOUT ANY WARRANTY.
  *
  * TWO HOST-INTERACTION BUGS, found 2026-08-22 by reading the HDPMI source
  * (HX repo, public), explain why every DJGPP test client passed while both
@@ -54,19 +58,20 @@
  *    FIX: register a CLI trap handler via HDPMI's documented vendor fn 9;
  *    when the CLI immediately follows a PUSHFD (or PUSHFD/POP EAX), the
  *    critical section will be exited with POPFD, so re-enable interrupts
- *    (DPMI 0901h) instead of letting them latch off.  /NOCLI disables it
- *    for bisecting.  PROVENANCE NOTE: the fn-9 ABI and the IOPL-0 POPFD
- *    behaviour are published (HDPMIAPI.TXT, Intel SDM); the idea of keying
- *    the heal on the PUSHFD idiom appears in vsbhda (GPL) - this file's
- *    implementation is our own, but do not publish before Nick rules on
- *    that provenance.
+ *    (DPMI 0901h) instead of letting them latch off.  /NOCLI disables it.
+ *    That fix is taken from VSBHDA - see the attribution at the handler.
  *
- * Clean-room: the HDPMI port-trap ABI is from Baron-von-Riedesel's published
- * HDPMIAPI.TXT (AX=168Ah "HDPMI" -> API entry; fn 5 context mode, fn 6
- * install {in,out FARPROCs}, fn 7 remove, fn 9 CLI/STI trap; the error-code
- * bit layout; the handler is called "like an exception handler proc" and
- * MUST advance the faulting EIP).  The MPU-401 UART-mode and 16550 register
- * models are published hardware standards.  No third-party source copied.
+ * Provenance.  The HDPMI port-trap ABI is from Baron-von-Riedesel's
+ * published HDPMIAPI.TXT (AX=168Ah "HDPMI" -> API entry; fn 5 context mode,
+ * fn 6 install {in,out FARPROCs}, fn 7 remove, fn 9 CLI/STI trap; the
+ * error-code bit layout; the handler is called "like an exception handler
+ * proc" and MUST advance the faulting EIP).  HDPMI itself is freeware "for
+ * any purpose", (C) Japheth.  The MPU-401 UART-mode and 16550 register
+ * models are published hardware standards.
+ *
+ * This program is GPL v2 because mpushim_cli_handler() below is derived
+ * from VSBHDA's _hdpmi_CliHandler (src/stackio.asm), (C)
+ * Baron-von-Riedesel, GPL v2 - see the attribution at that function.
  */
 
 #include <dpmi.h>
@@ -92,8 +97,6 @@
 #define RBLOB_UART   4    /* state-header offsets, must match MPUSHIMR.ASM */
 #define RBLOB_DATA   6
 #define RBLOB_STAT   8
-#define RBLOB_NOTX   11
-#define RBLOB_NOBC   12
 #define RBLOB_ENTRY  16   /* QPI handler entry offset inside the blob */
 
 /* Lock every page of this program at startup and keep sbrk from moving the
@@ -107,9 +110,6 @@ volatile unsigned short g_data = 0x330;  /* MPU data port                   */
 volatile unsigned short g_stat = 0x331;  /* MPU status/command port         */
 volatile unsigned char  g_ack  = 0;      /* 1 = 0FEh ACK waiting to be read */
 volatile unsigned char  g_busy = 0;      /* 1 = a handler is already active */
-volatile unsigned char  g_notx = 0;      /* /NOTX: answer, but never touch the UART */
-volatile unsigned char  g_nobc = 0;      /* /NOBC: skip the all-notes-off broadcast on FFh */
-volatile unsigned char  g_forceif = 0;   /* /IF: force IF set in the resumed EFLAGS */
 
 extern unsigned short   g_ds_st;         /* our DS - lives IN .text (see below) */
 extern void mpushim_out_handler(void);
@@ -219,7 +219,7 @@ asm(
 "   jmp  o_clear               # any other command: absorb          \n"
 /* RESET does what the real chip does: broadcast All Notes Off (CC 123 on
  * every channel).  Real MPU-401 silicon transmits this when it receives
- * FFh and SoftMPU emulates it, so it stays - but the 2026-08-22 /NOBC
+ * FFh and SoftMPU emulates it, so it stays - but a 2026-08-22 bench
  * regression showed it is NOT load-bearing for DOOM/DMX: DMX sends its
  * own note-offs at song stop, GM gear (Yamaha QY70) honours them, and
  * the CM-32L's droning note across DOOM's track changes persists WITH
@@ -228,8 +228,6 @@ asm(
  * notes and send per-note offs on reset (v0.3 candidate).  48 bytes at
  * wire speed is ~15ms inside this one trap, fine for an event this rare. */
 "o_reset:                                                           \n"
-"   cmp  byte ptr [_g_nobc], 0 # /NOBC: ACK only, no broadcast      \n"
-"   jne  o_ack                                                      \n"
 "   push ebx                   # o_tx eats BL; preserved across it  \n"
 "   mov  bh, 0xB0                                                   \n"
 "o_rst1:                                                            \n"
@@ -258,10 +256,6 @@ asm(
 "o_clear:                                                           \n"
 "   mov  byte ptr [_g_busy], 0                                      \n"
 "o_exit:                                                            \n"
-"   cmp  byte ptr [_g_forceif], 0                                    \n"
-"   je   o_noif                                                      \n"
-"   or   byte ptr [ebp+0x19], 2   # set IF (bit 9) in resumed EFLAGS \n"
-"o_noif:                                                             \n"
 "   pop  ds                                                         \n"
 "   pop  edx                                                        \n"
 "   pop  ecx                                                        \n"
@@ -277,8 +271,6 @@ asm(
 "o_tx:                                                              \n"
 "   push eax                                                        \n"
 "   push edx                                                        \n"
-"   cmp  byte ptr [_g_notx], 0 # /NOTX: swallow, touch no hardware  \n"
-"   jne  o_tx_done                                                  \n"
 "   mov  dx, [_g_uart]                                              \n"
 "   add  dx, 5                 # LSR                                \n"
 "   mov  ecx, 800              # ~1ms of ISA reads >> one byte time  \n"
@@ -358,10 +350,6 @@ asm(
 "   mov  byte ptr [_g_busy], 0                                      \n"
 "i_ret:                                                             \n"
 "   mov  [ebp-4], bl           # patch saved EAX low byte = our AL  \n"
-"   cmp  byte ptr [_g_forceif], 0                                    \n"
-"   je   i_noif                                                      \n"
-"   or   byte ptr [ebp+0x19], 2   # set IF (bit 9) in resumed EFLAGS \n"
-"i_noif:                                                             \n"
 "   pop  ds                                                         \n"
 "   pop  edx                                                        \n"
 "   pop  ecx                                                        \n"
@@ -371,6 +359,14 @@ asm(
 "   retf                                                            \n"
 "                                                                   \n"
 /* --------- CLI trap: heal the IOPL-0 PUSHFD/CLI...POPFD hole ----------- *
+ *
+ * DERIVED WORK.  This handler follows VSBHDA's _hdpmi_CliHandler
+ * (src/stackio.asm), (C) Baron-von-Riedesel, GNU GPL v2 - the same register
+ * discipline, the same "was the CLI preceded by PUSHFD?" test with the same
+ * 9Ch / 589Ch opcode constants, and the same re-enable via DPMI 0901h.  His
+ * comment there names the case it exists for: "needed by ID games' DOS/4G".
+ * That is why this program is GPL v2 rather than MIT.
+ *
  * Registered through HDPMI vendor fn 9.  Contract (HDPMIAPI.TXT): the host
  * has ALREADY cleared IF; no stack switch - we run on the interrupted
  * stack, which holds a plain IRETD frame [EIP after CLI][CS][EFLAGS]; all
@@ -574,8 +570,6 @@ static int rm_install(void)
     _farpokew(_dos_ds, home + RBLOB_UART, g_uart);
     _farpokew(_dos_ds, home + RBLOB_DATA, g_data);
     _farpokew(_dos_ds, home + RBLOB_STAT, g_stat);
-    _farpokeb(_dos_ds, home + RBLOB_NOTX, g_notx);
-    _farpokeb(_dos_ds, home + RBLOB_NOBC, g_nobc);
 
     memset(&r, 0, sizeof r);
     r.x.ax = 0x1A07;                               /* set trap handler */
@@ -717,24 +711,20 @@ int main(int argc, char **argv)
         if      (keymatch(a, "UART=")) g_uart = (unsigned short)parse_hex(a + 5);
         else if (keymatch(a, "MPU="))  g_data = (unsigned short)parse_hex(a + 4);
         else if (keymatch(a, "DIV="))  div    = parse_dec(a + 4);
-        else if (keymatch(a, "NOTX"))  g_notx = 1;
         else if (keymatch(a, "NOCLI")) nocli = 1;
-        else if (keymatch(a, "NOBC"))  g_nobc = 1;
         else if (keymatch(a, "NOPM"))  nopm = 1;
         else if (keymatch(a, "NORM"))  norm = 1;
-        else if (keymatch(a, "IF"))    g_forceif = 1;
         else {
-            outs("MPUSHIM 0.3 - MPU-401 facade over a serial UART, both worlds:\n"
-                 "V86 (real-mode) games via QPI + DPMI/DOS4GW games via HDPMI32i.\n"
-                 "  MPUSHIM [/UART=250] [/MPU=330] [/DIV=n] [/NOTX] [/NOCLI]\n"
+            outs("MPUSHIM 0.3 - MPU-401 facade over a serial UART, both trap worlds.\n"
+                 "  MPUSHIM [/UART=250] [/MPU=330] [/DIV=n] [/NORM] [/NOPM]\n"
+                 "  /UART  = serial UART base I/O port (default 250)\n"
+                 "  /MPU   = MPU-401 base the game expects (default 330)\n"
+                 "  /DIV   = reprogram the UART divisor for 31250 baud\n"
                  "  /NORM  = skip the V86 (QPI) side   /NOPM = skip the PM side\n"
-                 "  /NOTX  = diagnostic: answer the handshake, send no MIDI\n"
-                 "  /NOCLI = diagnostic: skip the DOS4G PUSHFD/CLI/POPFD heal\n"
-                 "  /NOBC  = diagnostic: no all-notes-off broadcast on reset\n"
-                 "  /IF    = diagnostic: force interrupts on at trap return\n"
+                 "  /NOCLI = skip the DOS4G PUSHFD/CLI/POPFD interrupt heal\n"
                  "Installs its traps and stays resident; start games normally.\n"
-                 "Hosts: HDPMI32i -r -x (PM); JEMM+QPIEMU / QEMM / VDPMI (V86).\n"
-                 "Either alone is fine - each side reports separately.\n");
+                 "Hosts: HDPMI32i -r -x (DOS4GW games), JEMM+QPIEMU / QEMM / VDPMI"
+                 " (real-mode).\n");
             return 0;
         }
     }
@@ -748,6 +738,24 @@ int main(int argc, char **argv)
              "  V86 side needs Jemm+QPIEMU, QEMM or VDPMI.\n");
         return 2;
     }
+    /* Already resident?  The V86 core carries 'MSHR' at offset 0 of its own
+     * block, so ask QPI who owns the trap and look for our marker.  Without
+     * this a second run reaches the install path and briefly re-points the
+     * live QPI handler before rolling back - and would orphan the first
+     * core outright if the port-trap call happened to succeed.  (A PM-only
+     * install leaves no such marker; there the honest answer is the
+     * "ports already trapped" the install itself reports.) */
+    if (qpi_ok) {
+        __dpmi_regs q;
+        memset(&q, 0, sizeof q);
+        q.x.ax = 0x1A06;                       /* get current trap handler */
+        if (qpi_call(&q) == 0 && q.x.es &&
+            _farpeekl(_dos_ds, (unsigned long)q.x.es << 4) == 0x5248534DUL) {
+            outs("MPUSHIM: already installed.\n");
+            return 0;
+        }
+    }
+
     __asm__ __volatile__("movw %%ds, %0" : "=m"(g_ds_st));
     if (div) uart_setdiv(g_uart, div);
 
@@ -756,7 +764,7 @@ int main(int argc, char **argv)
      * our DRR status bit and the transmit wait into "wait for the whole
      * FIFO to drain".  16450 semantics (THRE = room for one byte) is what
      * MIDI pacing wants, and we never use RX at all. */
-    if (!g_notx) outportb(g_uart + 2, 0x00);
+    outportb(g_uart + 2, 0x00);
 
     /* _CRT0_FLAG_LOCK_MEMORY already locked the image; lock the handler code
      * and the facade state again explicitly so a future build that drops the
@@ -777,9 +785,6 @@ int main(int argc, char **argv)
     outhex(g_stat, 3);
     outs(" -> UART ");
     outhex(g_uart, 3);
-    if (g_notx) outs(" [NOTX: no MIDI will be sent]");
-    if (g_nobc) outs(" [NOBC: no reset broadcast]");
-    if (g_forceif) outs(" [IF: forcing interrupts on]");
     outs("\n");
 
     if (hdpmi_ok) {

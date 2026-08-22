@@ -46,7 +46,8 @@
 ;
 ;  Build:  nasm -f bin MPUSHIM.ASM -o MPUSHIM.COM
 ;
-;  (C) 2026 zikolas, MIT.  Clean-room: the QPI port-trap ABI is the public
+;  (C) 2026 zikolas.  GNU General Public License v2 - see ../COPYING.
+;  Clean-room: the QPI port-trap ABI is the public
 ;  QEMM programming interface (int 67h AX=3F00h entry; far-call functions
 ;  1A06h get / 1A07h set trap handler, 1A08h status, 1A09h/1A0Ah trap/
 ;  untrap port; real-mode handler contract DX=port, CL bit2=OUT, AL=value),

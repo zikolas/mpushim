@@ -4,7 +4,7 @@
  *
  * Run under a resident MPUSHIM.  Purpose: separate "sustained protected
  * mode trapping is too slow / unstable" from "something specific to the
- * game".  MIT (c) 2026 zikolas.
+ * game".  (C) 2026 zikolas, GNU GPL v2 (see COPYING).
  */
 #include <stdio.h>
 #include <pc.h>

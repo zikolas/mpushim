@@ -2,7 +2,7 @@
  * grab a large memory block, touch every page, and allocate a pile of LDT
  * descriptors; then exit.  Run PMPOKE before and after: if the facade works
  * before and fails after, a big client is invalidating the resident trap
- * handler's memory or selectors.  MIT (c) 2026 zikolas.
+ * handler's memory or selectors.  (C) 2026 zikolas, GNU GPL v2 (see COPYING).
  */
 #include <stdio.h>
 #include <dpmi.h>

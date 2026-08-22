@@ -6,7 +6,7 @@
  *
  * Expected with the facade working: status reads 80, reset ACK FE arrives,
  * UART-mode ACK FE arrives, note-on bytes accepted (and heard, ch2).
- * MIT (c) 2026 zikolas.
+ * (C) 2026 zikolas, GNU GPL v2 (see COPYING).
  */
 #include <stdio.h>
 #include <pc.h>

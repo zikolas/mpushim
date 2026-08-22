@@ -5,7 +5,7 @@
  *
  * Run under a resident MPUSHIM.  It hooks the PM timer vector, writes a
  * MIDI-ish byte + polls status on every tick for ~10 seconds, prints a live
- * count, then unhooks.  MIT (c) 2026 zikolas.
+ * count, then unhooks.  (C) 2026 zikolas, GNU GPL v2 (see COPYING).
  */
 #include <stdio.h>
 #include <dpmi.h>

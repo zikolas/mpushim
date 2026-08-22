@@ -12,15 +12,17 @@
 ;
 ;  This is MPUSHIM.COM 0.1's bench-proven resident core, brought to parity
 ;  with the protected-mode facade: same status model (always write-ready),
-;  ACK on reset/UART-mode, all-notes-off broadcast on reset (NOBC patches
-;  it off), paced bounded transmit, NOTX.
+;  ACK on reset/UART-mode, all-notes-off broadcast on reset, and a paced
+;  bounded transmit that never drops a byte.
 ;
 ;  QPI real-mode handler contract: DX = port, CL bit 2 = OUT (else IN),
 ;  CL bits 3-5 = word/dword/string (absorbed), AL = value for OUT; RETF,
 ;  with AL = the byte handed back for an IN.  Runs in the guest's V86
 ;  context with unknown DS/SS; preserves everything except AL on IN.
 ;
-;  (C) 2026 zikolas, MIT.  Clean-room - see MPUSHIM.ASM / MPUSHIM.C.
+;  (C) 2026 zikolas.  GNU General Public License v2 - see COPYING.
+;  Provenance: see MPUSHIM.C.  This file is original work; the QPI
+;  handler contract it implements is the public QEMM interface.
 ;==========================================================================
         cpu  386
         org  0
@@ -31,10 +33,8 @@ uart_base dw 0250h                    ; +4   serial UART base I/O port
 mpu_data  dw 0330h                    ; +6   MPU data port
 mpu_stat  dw 0331h                    ; +8   MPU status/command port
 ackpend   db 0                        ; +10  1 = 0FEh ACK waiting
-f_notx    db 0                        ; +11  /NOTX: touch no hardware
-f_nobc    db 0                        ; +12  /NOBC: no reset broadcast
-uartmode  db 0                        ; +13  informational
-drops     dw 0                        ; +14  TX bytes dropped (UART dead)
+uartmode  db 0                        ; +11  informational
+drops     dw 0                        ; +12  TX bytes dropped (UART dead)
 
         times 16-($-$$) db 0          ; assembler guard: entry stays at +16
 
@@ -88,9 +88,7 @@ handler:
         jmp  .cmd_ack
 .cmd_reset:
         ; real MPU-401 silicon broadcasts All Notes Off on reset; parity
-        ; with the PM facade (and /NOBC patches f_nobc to skip it)
-        test byte cs:[f_nobc], 1
-        jnz  .cmd_ack
+        ; with the PM facade
         push ax
         push bx
         push cx
@@ -126,8 +124,6 @@ handler:
 ; ---- BL -> UART transmitter; bounded THRE spin, drop only if dead --------
 ; clobbers AX, CX, DX (callers save around it)
 send_bl:
-        test byte cs:[f_notx], 1
-        jnz  .done
         mov  dx, cs:[uart_base]
         add  dx, 5                    ; LSR
         mov  cx, 0FFFFh               ; generous bound; never a hang
