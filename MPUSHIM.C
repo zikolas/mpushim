@@ -21,8 +21,8 @@
  *
  * It installs its traps and stays resident; games are then started
  * NORMALLY.  Prereqs: HDPMI32i resident (-r -x) for the PM side, a QPI
- * host for the V86 side, and the UART already brought up (EXPG3GO /PCIC
- * for the G3; a COM port needs no enabler).
+ * host for the V86 side, and the UART already brought up by its card
+ * enabler (a COM port needs no enabler).
  * Build: ./build-pm.sh (nasm + DJGPP).  Remove: reboot.
  *
  * Copyright (C) 2026 zikolas.  GNU General Public License v2 (see

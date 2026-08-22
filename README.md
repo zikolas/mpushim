@@ -24,6 +24,20 @@ Traps the two MPU ports (`330h` data, `331h` status/command) and:
 - **forwards MIDI bytes** to the UART transmitter, paced on the Line Status
   Register. Bytes are never dropped.
 
+## Interfaces
+
+Anything whose MIDI output is a 16550-compatible UART. Two worked examples:
+
+* **EXP Game Traveler PC Cards** (the GAME/MIDI variants) — the card's MIDI is
+  a bare UART with no MPU engine behind it. Bring the card up with
+  [EXPGXGO](https://github.com/zikolas/expgxgo) (a separate tool, MIT) first,
+  then point the shim at the UART base it reports (`/UART=250` is that card's
+  default).
+* **Serdaco [MPU-232](https://www.serdashop.com/MPU-232)** — an RS-232-to-MIDI
+  dongle on a plain COM port, so a machine with no sound card and no free slot
+  still gets game MIDI. DIP switches all OFF (38400 baud, binary):
+  `/UART=3F8 /DIV=3`, as in `GO232.BAT`.
+
 ## Requirements
 
 A trap host for each world. Either alone works — each side installs and
