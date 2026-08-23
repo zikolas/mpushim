@@ -1,28 +1,40 @@
-/* MPUSHIM 0.3 - the WHOLE MPU-401 (UART mode) facade in one binary: an
+/* MPUSHIM 0.4 - the WHOLE MPU-401 (UART mode) facade in one binary: an
  * MPU-401 at 330h over a plain serial UART (the EXP GAME/MIDI G3's hidden
  * UART at 250h, or a COM port + an MPU-232 dongle), for BOTH worlds:
  *
  *  - V86 (real-mode) games - SCUMM/iMUSE, Sierra, Miles: a 199-byte
  *    real-mode core (MPUSHIMR.ASM, embedded as a blob) is planted in a
  *    small DOS block of its own and registered with the QPI port-trap
- *    host (Jemm's QPIEMU, QEMM, or VDPMI);
+ *    host (Jemm's QPIEMU or QEMM);
  *  - 32-bit DPMI/DOS4GW games - the General MIDI era: FAR32 handlers
  *    registered through HDPMI32i's documented I/O-trap API.
  *
- * Either host alone is fine; each side installs and reports independently
- * (a PM-only boot just notes there is no QPI host, and vice versa).  Both
- * facades behave identically: correct MPU-401 UART-mode status (always
- * write-ready), the 0FEh reset/UART-mode ACK, All-Notes-Off broadcast on
- * reset, and MIDI data paced onto the real UART, never dropped.  This
- * supersedes the separate MPUSHIM.COM + MPUSHIMP.EXE pair (the standalone
- * .COM remains in the repo for QPI-only stacks without any DPMI host).
+ * ...and, on a Pentium or better, through EITHER of those or through a
+ * third arrangement that replaces both:
  *
- *     MPUSHIM [/UART=250] [/MPU=330] [/DIV=n] [/NORM] [/NOPM] [/NOCLI]
+ *  - VDPMI, crazii's DPMI host with its own V86 monitor, traps ring-3 and
+ *    V86 I/O in ONE table, so a single registration there covers the whole
+ *    catalogue with one resident host instead of three (JEMM386 + QPIEMU +
+ *    HDPMI32i).  It is detected first and used alone; /NOVD ignores it and
+ *    goes back to the pair.  VDPMI executes RDTSC and RDMSR unguarded, so
+ *    it is Pentium-only - the 386/486 fleet keeps the QPI + HDPMI stack,
+ *    which runs unchanged on a Pentium as well.
+ *
+ * Any one host is enough; the sides install and report independently (a
+ * PM-only boot just notes there is no QPI host, and vice versa).  All
+ * three facades behave identically: correct MPU-401 UART-mode status
+ * (always write-ready), the 0FEh reset/UART-mode ACK, All-Notes-Off
+ * broadcast on reset, and MIDI data paced onto the real UART, never
+ * dropped.  This supersedes the separate MPUSHIM.COM + MPUSHIMP.EXE pair
+ * (the standalone .COM remains in the repo for QPI-only stacks without any
+ * DPMI host).
+ *
+ *   MPUSHIM [/UART=250] [/MPU=330] [/DIV=n] [/NORM] [/NOPM] [/NOVD] [/NOCLI]
  *
  * It installs its traps and stays resident; games are then started
- * NORMALLY.  Prereqs: HDPMI32i resident (-r -x) for the PM side, a QPI
- * host for the V86 side, and the UART already brought up by its card
- * enabler (a COM port needs no enabler).
+ * NORMALLY.  Prereqs: VDPMI resident, or HDPMI32i (-r -x) for the PM side
+ * and a QPI host for the V86 side; and the UART already brought up by its
+ * card enabler (a COM port needs no enabler).
  * Build: ./build-pm.sh (nasm + DJGPP).  Remove: reboot.
  *
  * Copyright (C) 2026 zikolas.  GNU General Public License v2 (see
@@ -69,9 +81,13 @@
  * any purpose", (C) Japheth.  The MPU-401 UART-mode and 16550 register
  * models are published hardware standards.
  *
- * This program is GPL v2 because mpushim_cli_handler() below is derived
- * from VSBHDA's _hdpmi_CliHandler (src/stackio.asm), (C)
- * Baron-von-Riedesel, GPL v2 - see the attribution at that function.
+ * This program is GPL v2 because two pieces of it are derived from GPL v2
+ * sources, each attributed at the function it belongs to:
+ * mpushim_cli_handler() follows VSBHDA's _hdpmi_CliHandler
+ * (src/stackio.asm), (C) Baron-von-Riedesel, and mpushim_vd_handler()
+ * follows the trap-handler contract that SBEMU's client driver for VDPMI
+ * (vdpmi.c, (C) crazii) documents by implementing it - VDPMI's own
+ * vendor API is not published anywhere else.
  */
 
 #include <dpmi.h>
@@ -85,6 +101,7 @@
 #include <sys/movedata.h>
 #include <sys/segments.h>
 #include <sys/exceptn.h>
+#include <sys/nearptr.h>   /* __djgpp_base_address: our offsets -> linear */
 
 /* The real-mode (V86) resident core, assembled flat from MPUSHIMR.ASM and
  * embedded here (build-pm.sh: nasm -> xxd -i).  At install it is copied
@@ -110,11 +127,28 @@ volatile unsigned short g_data = 0x330;  /* MPU data port                   */
 volatile unsigned short g_stat = 0x331;  /* MPU status/command port         */
 volatile unsigned char  g_ack  = 0;      /* 1 = 0FEh ACK waiting to be read */
 volatile unsigned char  g_busy = 0;      /* 1 = a handler is already active */
+/* Diagnostics (v0.4, for the Tyrian stall hunt - see the trace notes below) */
+volatile unsigned char  g_ackall = 0;    /* 1 = ACK every command, not just FF/3F */
+volatile unsigned char  g_trace  = 0;    /* 1 = record traffic into the DOS block */
+volatile unsigned short g_dosds  = 0;    /* a base-0 selector, to reach that block */
+volatile unsigned long  g_tr_lin = 0;    /* its linear address                     */
+volatile unsigned long  g_tr_idx = 0;    /* next entry to write (ring of 1024)     */
+volatile unsigned char  g_nofifo = 0;    /* 1 = the old drop-on-nesting behaviour  */
+volatile unsigned char  g_tr1    = 0;    /* 1 = stop tracing once the ring fills   */
+/* The transmit queue.  256 bytes, byte indices, so the ring wraps by itself. */
+volatile unsigned char  g_fifo[256];
+volatile unsigned char  g_fhead = 0;
+volatile unsigned char  g_ftail = 0;
+volatile unsigned char  g_drain = 0;     /* 1 = somebody is already draining it */
 
 extern unsigned short   g_ds_st;         /* our DS - lives IN .text (see below) */
+extern unsigned long    g_vd_old;        /* VDPMI: the handler before us,  */
+extern unsigned short   g_vd_old_sel;    /*        offset + selector       */
 extern void mpushim_out_handler(void);
 extern void mpushim_in_handler(void);
 extern void mpushim_cli_handler(void);
+extern void mpushim_vd_handler(void);
+extern char mpushim_code_end[];          /* just past the last handler */
 
 /* ---- the HDPMI trap handlers ------------------------------------------
  *
@@ -172,6 +206,18 @@ asm(
 "   .globl _mpushim_cli_handler                                    \n"
 "   .globl _g_ds_st                                                \n"
 "_g_ds_st:                                                         \n"
+"   .word 0                                                        \n"
+   /* The port-trap handler VDPMI had before us: ports that are not ours
+    * are passed down this chain, so several drivers can share the host's
+    * one global handler slot (SBEMU for the sound card, us for MIDI).  A
+    * 16:32 far pointer, selector 0 meaning nobody was there.  It lives in
+    * .text next to g_ds_st so the far jump reaches it through CS. */
+"   .balign 4                                                      \n"
+"   .globl _g_vd_old                                               \n"
+"   .globl _g_vd_old_sel                                           \n"
+"_g_vd_old:                                                        \n"
+"   .long 0                                                        \n"
+"_g_vd_old_sel:                                                    \n"
 "   .word 0                                                        \n"
 "   .balign 4                                                      \n"
 "                                                                  \n"
@@ -264,31 +310,88 @@ asm(
 "   pop  ebp                                                        \n"
 "   retf                                                            \n"
 "                                                                   \n"
-/* BL -> the UART transmitter.  Wait for THRE with a ~1.5-byte-time bound
- * (ECX is disposable here: the client's ECX is restored from the saved
- * frame slot at handler exit).  Real IF is 0 for the whole handler, so
- * the wait cannot be preempted; the bound only guards dead hardware.     */
+/* BL -> the UART transmitter, through a 256-byte queue.
+ *
+ * The queue exists because under VDPMI a trap handler CAN be preempted -
+ * unlike HDPMI, which dispatches with the real IF clear.  A game whose music
+ * ISR writes MIDI while its main thread also touches the MPU then re-enters
+ * this code mid-byte.  The first design answered that with a reentrancy flag
+ * that made the nested call give up, which breaks the project's oldest law:
+ * NEVER DROP A MIDI BYTE (2026-08-22, Tyrian).  So now every byte is queued
+ * and the FIRST caller in drains the whole queue; a nested caller appends
+ * and returns immediately.  Order is preserved, nothing is lost, and the
+ * inner caller is never made to wait.
+ *
+ * The drain waits for THRE with a ~1.5-byte-time bound and drops a byte only
+ * if the UART is genuinely dead - the bound guards absent hardware, nothing
+ * else.  /NOFIFO restores the old behaviour for A/B tests.               */
 "o_tx:                                                              \n"
 "   push eax                                                        \n"
+"   push ebx                                                        \n"
+"   push ecx                                                        \n"
 "   push edx                                                        \n"
+"   cmp  byte ptr [_g_nofifo], 0                                    \n"
+"   jne  o_tx_direct                                                \n"
+"   movzx eax, byte ptr [_g_fhead]                                  \n"
+"   mov  cl, al                                                     \n"
+"   inc  cl                                                         \n"
+"   cmp  cl, [_g_ftail]        # queue full? (256 bytes: never seen)\n"
+"   je   o_tx_ret                                                   \n"
+"   mov  [_g_fifo+eax], bl                                          \n"
+"   mov  [_g_fhead], cl                                             \n"
+"   cmp  byte ptr [_g_drain], 0                                     \n"
+"   jne  o_tx_ret              # nested: the outer drain takes it   \n"
+"   mov  byte ptr [_g_drain], 1                                     \n"
+"o_tx_loop:                                                         \n"
+"   mov  al, [_g_ftail]                                             \n"
+"   cmp  al, [_g_fhead]                                             \n"
+"   je   o_tx_end              # queue empty: done                  \n"
 "   mov  dx, [_g_uart]                                              \n"
 "   add  dx, 5                 # LSR                                \n"
-"   mov  ecx, 800              # ~1ms of ISA reads >> one byte time  \n"
+"   mov  ecx, 800              # ~1ms of reads >> one byte time     \n"
 "o_tx_wait:                                                         \n"
 "   in   al, dx                                                     \n"
 "   test al, 0x20              # THRE: room for a byte?             \n"
-"   jnz  o_tx_send                                                  \n"
+"   jnz  o_tx_pop                                                   \n"
 "   dec  ecx                                                        \n"
 "   jnz  o_tx_wait                                                  \n"
-"   jmp  o_tx_done             # UART dead: drop, never hang        \n"
-"o_tx_send:                                                         \n"
+"   movzx eax, byte ptr [_g_ftail]   # UART dead: drop one, stop    \n"
+"   inc  al                                                         \n"
+"   mov  [_g_ftail], al                                             \n"
+"   jmp  o_tx_end                                                   \n"
+"o_tx_pop:                                                          \n"
+"   movzx eax, byte ptr [_g_ftail]                                  \n"
+"   mov  bl, [_g_fifo+eax]                                          \n"
+"   inc  al                                                         \n"
+"   mov  [_g_ftail], al                                             \n"
 "   mov  dx, [_g_uart]         # THR                                \n"
 "   mov  al, bl                                                     \n"
 "   out  dx, al                                                     \n"
-"o_tx_done:                                                         \n"
+"   jmp  o_tx_loop                                                  \n"
+"o_tx_end:                                                          \n"
+"   mov  byte ptr [_g_drain], 0                                     \n"
+"o_tx_ret:                                                          \n"
 "   pop  edx                                                        \n"
+"   pop  ecx                                                        \n"
+"   pop  ebx                                                        \n"
 "   pop  eax                                                        \n"
 "   ret                                                             \n"
+"o_tx_direct:                                                       \n"
+"   mov  dx, [_g_uart]                                              \n"
+"   add  dx, 5                                                      \n"
+"   mov  ecx, 800                                                   \n"
+"o_txd_wait:                                                        \n"
+"   in   al, dx                                                     \n"
+"   test al, 0x20                                                   \n"
+"   jnz  o_txd_send                                                 \n"
+"   dec  ecx                                                        \n"
+"   jnz  o_txd_wait                                                 \n"
+"   jmp  o_tx_ret                                                   \n"
+"o_txd_send:                                                        \n"
+"   mov  dx, [_g_uart]                                              \n"
+"   mov  al, bl                                                     \n"
+"   out  dx, al                                                     \n"
+"   jmp  o_tx_ret                                                   \n"
 "                                                                   \n"
 /* --------- IN: the client read a byte from a trapped MPU port ---------- */
 "_mpushim_in_handler:                                               \n"
@@ -358,6 +461,227 @@ asm(
 "   pop  ebp                                                        \n"
 "   retf                                                            \n"
 "                                                                   \n"
+/* --------- the traffic recorder (diagnostic) ---------------------------- *
+ *
+ * Writes what the games actually do into a plain DOS-memory block, where
+ * COMrade can read it straight out of conventional memory - no dump tool and
+ * no second client needed.  Entries are 8 bytes:
+ *     +0 value   +1 tag (0 data out, 1 command out, 2 data in, 3 status in)
+ *     +2 repeat count   +4 BIOS tick when the run started
+ * Consecutive identical (tag,value) pairs COALESCE into the repeat count -
+ * without that, one poll loop would flood the ring and hide the commands
+ * around it; with it, a stall shows up as a single "status 80 x 48000"
+ * entry and the tick stamps either side say how long it lasted.
+ * Block header: +0 'MTRC'  +4 ring index  +8 total events.
+ * AH = tag, AL = value.  Preserves every register.                        */
+"tr_rec:                                                            \n"
+"   cmp  byte ptr [_g_trace], 0                                     \n"
+"   je   tr_ret                                                     \n"
+"   push eax                                                        \n"
+"   push ebx                                                        \n"
+"   push ecx                                                        \n"
+"   push edi                                                        \n"
+"   push es                                                         \n"
+"   mov  bx, [_g_dosds]                                             \n"
+"   mov  es, bx                                                     \n"
+"   mov  edi, [_g_tr_lin]                                           \n"
+"   mov  ebx, [_g_tr_idx]                                           \n"
+"   mov  ecx, ebx              # the entry before this one          \n"
+"   dec  ecx                                                        \n"
+"   and  ecx, 1023                                                  \n"
+"   lea  ecx, [edi+ecx*8+16]                                        \n"
+"   cmp  word ptr es:[ecx], ax # same thing again? just count it    \n"
+"   jne  tr_new                                                     \n"
+"   inc  word ptr es:[ecx+2]                                        \n"
+"   jmp  tr_tot                                                     \n"
+"tr_new:                                                            \n"
+"   lea  ecx, [edi+ebx*8+16]                                        \n"
+"   mov  es:[ecx], ax                                               \n"
+"   mov  word ptr es:[ecx+2], 1                                     \n"
+"   push edx                                                        \n"
+"   mov  edx, es:[0x46C]       # the BIOS tick count, at linear 46Ch\n"
+"   mov  es:[ecx+4], edx                                            \n"
+"   pop  edx                                                        \n"
+"   inc  ebx                                                        \n"
+"   and  ebx, 1023                                                  \n"
+"   mov  [_g_tr_idx], ebx                                           \n"
+"   mov  es:[edi+4], ebx                                            \n"
+"   test ebx, ebx              # ring just wrapped?                 \n"
+"   jnz  tr_tot                                                     \n"
+"   cmp  byte ptr [_g_tr1], 0  # /TRACE1: keep the FIRST 1024 only  \n"
+"   je   tr_tot                                                     \n"
+"   mov  byte ptr [_g_trace], 0                                     \n"
+"tr_tot:                                                            \n"
+"   inc  dword ptr es:[edi+8]                                       \n"
+"   pop  es                                                         \n"
+"   pop  edi                                                        \n"
+"   pop  ecx                                                        \n"
+"   pop  ebx                                                        \n"
+"   pop  eax                                                        \n"
+"tr_ret:                                                            \n"
+"   ret                                                             \n"
+"                                                                   \n"
+/* --------- VDPMI: ONE handler, BOTH worlds ----------------------------- *
+ *
+ * VDPMI (crazii's DPMI host with its own V86 monitor and virtual PIC,
+ * Pentium-only) traps V86 and ring-3 protected-mode I/O through the SAME
+ * table, so under it a single registration covers real-mode and DOS/4GW
+ * games alike - no QPI blob, no HDPMI, one resident host instead of three.
+ *
+ * Entered by a FAR CALL with a pure argument frame - the client's own
+ * registers are the host's business, not ours, and DS is undefined:
+ *     [ebp+0x04] return EIP     [ebp+0x08] return CS
+ *     [ebp+0x0C] the byte the client's IN will read   <- we write this
+ *     [ebp+0x10] port           [ebp+0x14] flags (bit 0 = OUT)
+ *     [ebp+0x18] the byte an OUT wrote
+ * Finish with a far RET and the host pops the frame.  A port that is not
+ * ours is handed on to the handler registered before us with the frame
+ * exactly as it arrived.
+ *
+ * The facade is the same one the HDPMI pair above implements, and so are
+ * its hard-won rules: never drop a MIDI byte, always report write-ready.
+ * There is no EIP to advance here and no error code to decode: the host
+ * resumes the client itself and hands us the port, the direction and the
+ * value ready-made.  Only bit 0 of the flags word has a published meaning,
+ * so - exactly like SBEMU - this models byte accesses only; if a client
+ * ever writes a word to an MPU port, the high half goes nowhere.  No game
+ * does, and guessing at the rest of that word could do real damage.
+ *
+ * DERIVED WORK.  VDPMI's vendor API is not in VDPMI.TXT; this handler's
+ * calling contract - the argument frame, the far-return, the "return with
+ * bit 31 set / jump to the previous handler" chaining - is read off
+ * SBEMU's client-side driver for it (vdpmi.c, (C) crazii, GNU GPL v2),
+ * which is the published description of that ABI.  Another reason this
+ * program is GPL v2; see the header.                                      */
+"   .globl _mpushim_vd_handler                                       \n"
+"_mpushim_vd_handler:                                               \n"
+"   push ebp                                                        \n"
+"   mov  ebp, esp                                                   \n"
+"   push eax                                                        \n"
+"   push ebx                                                        \n"
+"   push ecx                                                        \n"
+"   push edx                                                        \n"
+"   push ds                                                         \n"
+"   mov  bx, cs:[_g_ds_st]                                          \n"
+"   mov  ds, bx                                                     \n"
+"   mov  edx, [ebp+0x10]       # the port                           \n"
+"   mov  cx, [_g_stat]                                              \n"
+"   cmp  dx, cx                                                     \n"
+"   je   v_mine                                                     \n"
+"   mov  cx, [_g_data]         # must be OUR port, else pass it on  \n"
+"   cmp  dx, cx                                                     \n"
+"   jne  v_chain                                                    \n"
+"v_mine:                                                            \n"
+"   mov  ebx, 0x80             # idle status: no data, write-ready  \n"
+/* No reentrancy guard on this path any more.  VDPMI can preempt a trap
+ * handler (HDPMI cannot - it dispatches with the real IF clear), and the
+ * guard turned that into a DROPPED byte and a LIE: a nested status read
+ * answered "no data" even with an ACK pending, and a nested command was
+ * swallowed whole, so a game that never saw its ACK sat in its retry
+ * timeout for seconds.  That is exactly the Tyrian symptom - fine in the
+ * jukebox where only the music ISR touches the MPU, stalling in the menu
+ * where the main thread touches it too.  The transmit queue in o_tx makes
+ * nesting harmless, so the honest answer is always given.  /NOFIFO puts
+ * the old behaviour back, to demonstrate the fault on demand.          */
+"   cmp  byte ptr [_g_nofifo], 0                                    \n"
+"   je   v_go                                                       \n"
+"   cmp  byte ptr [_g_busy], 0                                      \n"
+"   jne  v_nested                                                   \n"
+"   mov  byte ptr [_g_busy], 1                                      \n"
+"v_go:                                                              \n"
+"   test byte ptr [ebp+0x14], 1                                     \n"
+"   jnz  v_out                                                      \n"
+"   mov  cx, [_g_stat]         # ---- IN ----                       \n"
+"   cmp  dx, cx                                                     \n"
+"   je   v_i_stat                                                   \n"
+"   mov  ah, 2                 # trace tag: data read               \n"
+"   xor  ebx, ebx              # data port: the ACK once, then 0    \n"
+"   cmp  byte ptr [_g_ack], 0                                       \n"
+"   je   v_i_done                                                   \n"
+"   mov  byte ptr [_g_ack], 0                                       \n"
+"   mov  ebx, 0xFE                                                  \n"
+"   jmp  v_i_done                                                   \n"
+"v_i_stat:                                                          \n"
+"   mov  ah, 3                 # trace tag: status read             \n"
+"   mov  ebx, 0x80             # bit7=1 no data, bit6=0 write-ready \n"
+"   cmp  byte ptr [_g_ack], 0                                       \n"
+"   je   v_i_done                                                   \n"
+"   xor  ebx, ebx              # ACK pending: data ready            \n"
+"v_i_done:                                                          \n"
+"   mov  al, bl                                                     \n"
+"   call tr_rec                                                     \n"
+"   mov  byte ptr [_g_busy], 0                                      \n"
+"   jmp  v_ret                                                      \n"
+"v_out:                                                             \n"
+"   mov  eax, [ebp+0x18]       # the byte written                   \n"
+"   mov  cx, [_g_stat]                                              \n"
+"   cmp  dx, cx                                                     \n"
+"   je   v_o_cmd                                                    \n"
+"   mov  ah, 0                 # trace tag: data written            \n"
+"   call tr_rec                                                     \n"
+"   mov  bl, al                # data: straight out to the UART     \n"
+"   call o_tx                                                       \n"
+"   jmp  v_o_done                                                   \n"
+"v_o_cmd:                                                           \n"
+"   mov  ah, 1                 # trace tag: command written         \n"
+"   call tr_rec                                                     \n"
+"   cmp  al, 0xFF              # reset: notes-off bcast + ACK       \n"
+"   je   v_o_reset                                                  \n"
+"   cmp  al, 0x3F              # enter UART mode -> queue the ACK   \n"
+"   je   v_o_ack                                                    \n"
+"   cmp  byte ptr [_g_ackall], 0   # /ACKALL: answer everything     \n"
+"   jne  v_o_ack                                                    \n"
+"   jmp  v_o_done              # any other command: absorb          \n"
+"v_o_reset:                                                         \n"
+"   mov  bh, 0xB0                                                   \n"
+"v_o_rst1:                                                          \n"
+"   mov  bl, bh                # Bn: control change, channel n      \n"
+"   call o_tx                                                       \n"
+"   mov  bl, 0x7B              # CC 123: all notes off              \n"
+"   call o_tx                                                       \n"
+"   mov  bl, 0x00                                                   \n"
+"   call o_tx                                                       \n"
+"   inc  bh                                                         \n"
+"   cmp  bh, 0xC0                                                   \n"
+"   jne  v_o_rst1                                                   \n"
+"v_o_ack:                                                           \n"
+"   mov  byte ptr [_g_ack], 1                                       \n"
+"v_o_done:                                                          \n"
+"   mov  byte ptr [_g_busy], 0                                      \n"
+"   xor  ebx, ebx              # an OUT reads back nothing          \n"
+"   jmp  v_ret                 # (do NOT fall into v_nested)        \n"
+"v_nested:                    # /NOFIFO only: record what gets lost \n"
+"   mov  ah, 4                                                      \n"
+"   mov  al, [ebp+0x18]                                             \n"
+"   call tr_rec                                                     \n"
+"   mov  ebx, 0x80                                                  \n"
+"v_ret:                                                             \n"
+"   mov  [ebp+0x0C], ebx                                            \n"
+"   pop  ds                                                         \n"
+"   pop  edx                                                        \n"
+"   pop  ecx                                                        \n"
+"   pop  ebx                                                        \n"
+"   pop  eax                                                        \n"
+"   pop  ebp                                                        \n"
+"   retf                                                            \n"
+/* Not ours: hand the frame on exactly as it arrived.  If there was no
+ * handler before us the port cannot be one we enabled, so answer open bus
+ * rather than jump through a null far pointer.                          */
+"v_chain:                                                           \n"
+"   cmp  word ptr cs:[_g_vd_old_sel], 0                             \n"
+"   jne  v_chain_go                                                 \n"
+"   mov  ebx, 0xFF                                                  \n"
+"   jmp  v_ret                                                      \n"
+"v_chain_go:                                                        \n"
+"   pop  ds                                                         \n"
+"   pop  edx                                                        \n"
+"   pop  ecx                                                        \n"
+"   pop  ebx                                                        \n"
+"   pop  eax                                                        \n"
+"   pop  ebp                                                        \n"
+"   .byte 0x2E, 0xFF, 0x2D     # jmp fword ptr cs:[g_vd_old]        \n"
+"   .long _g_vd_old                                                 \n"
+"                                                                   \n"
 /* --------- CLI trap: heal the IOPL-0 PUSHFD/CLI...POPFD hole ----------- *
  *
  * DERIVED WORK.  This handler follows VSBHDA's _hdpmi_CliHandler
@@ -396,22 +720,24 @@ asm(
 "   pop  esi                                                        \n"
 "   pop  ds                                                         \n"
 "   iretd                                                           \n"
+"   .globl _mpushim_code_end                                        \n"
+"_mpushim_code_end:                                                 \n"
 "   .att_syntax prefix                                              \n"
 );
 
-/* ---- HDPMI vendor API -------------------------------------------------
- * AX=168Ah with DS:ESI -> "HDPMI" returns AL=0 and the API entry in ES:EDI.
+/* ---- finding a host's vendor API --------------------------------------
+ * AX=168Ah with DS:ESI -> a host's signature returns AL=0 and that host's
+ * API entry in ES:EDI.  "HDPMI" answers on HDPMI32i, "VDPMI" on VDPMI.
  * (int 2Fh is the call that answers here; int 31h does not.)  The entry is
- * then reached by an lcall through a 16:32 far pointer. */
-static struct { unsigned long off; unsigned short sel; } __attribute__((packed)) hdpmi_entry;
+ * then reached by an lcall through the returned 16:32 far pointer. */
+typedef struct { unsigned long off; unsigned short sel; } __attribute__((packed)) FARPTR32;
+static FARPTR32 hdpmi_entry, vdpmi_entry;
 
-static int get_hdpmi(void)
+static int get_vendor_api(const char *sig, FARPTR32 *entry)
 {
     unsigned char ok = 1;
     unsigned short sel = 0;
     unsigned long off = 0;
-    static const char sig[] = "HDPMI";
-    const char *psig = sig;
     __asm__ __volatile__(
         "pushl %%es         \n"
         "movl  %3, %%esi    \n"
@@ -423,11 +749,11 @@ static int get_hdpmi(void)
         "movl  %%edi, %2    \n"
         "popl  %%es         \n"
         : "=m"(ok), "=m"(sel), "=m"(off)
-        : "r"(psig)
+        : "r"(sig)
         : "eax", "esi", "edi");
     if (ok != 0) return 0;
-    hdpmi_entry.off = off;
-    hdpmi_entry.sel = sel;
+    entry->off = off;
+    entry->sel = sel;
     return (sel != 0);
 }
 
@@ -603,6 +929,127 @@ static int rm_install(void)
     return 1;
 }
 
+/* ---- VDPMI's port-trap API --------------------------------------------
+ * Not documented in VDPMI.TXT; these are the calls SBEMU's client driver
+ * makes (vdpmi.c, GPL v2 - see the attribution at the handler).  Each is an
+ * lcall through the vendor entry with the function number in EAX and CF set
+ * on failure:
+ *    1  get the current port-trap handler           -> CX:EDX
+ *    2  set the port-trap handler       ECX = CS, EDX = offset
+ *    3  is this port trapped?           EDX = port  -> EAX
+ *    4  trap / untrap one port          EDX = port, ECX = 1 / 0
+ * (5 performs an untrapped access on the client's behalf, 6 and 7 are
+ * client IRQ handling, 8 maps linear to physical - none of them needed
+ * here: our handler talks to the UART with plain IN/OUT, exactly as it
+ * does under HDPMI, and we raise no interrupts.)  Nothing published says
+ * which registers the entry preserves, so every call below declares EBX,
+ * ESI and EDI clobbered as well and lets the compiler save what it cares
+ * about.                                                                */
+static int vd_get_handler(unsigned long *off, unsigned short *sel)
+{
+    unsigned char err = 0;
+    unsigned long o = 0;
+    unsigned short sl = 0;
+    __asm__ __volatile__(
+        "movl  $1, %%eax    \n"
+        "lcall *%3          \n"
+        "setc  %2           \n"
+        "movl  %%edx, %0    \n"
+        "movw  %%cx, %1     \n"
+        : "=m"(o), "=m"(sl), "=m"(err)
+        : "m"(vdpmi_entry)
+        : "eax", "ecx", "edx", "ebx", "esi", "edi");
+    *off = o; *sel = sl;
+    return !err;
+}
+
+static int vd_set_handler(unsigned short sel, unsigned long off)
+{
+    unsigned char err = 0;
+    __asm__ __volatile__(
+        "movl  $2, %%eax    \n"
+        "movzwl %1, %%ecx   \n"
+        "movl  %2, %%edx    \n"
+        "lcall *%3          \n"
+        "setc  %0           \n"
+        : "=m"(err)
+        : "m"(sel), "m"(off), "m"(vdpmi_entry)
+        : "eax", "ecx", "edx", "ebx", "esi", "edi");
+    return !err;
+}
+
+static int vd_is_trapped(unsigned port)
+{
+    unsigned char err = 0;
+    unsigned long state = 0;
+    __asm__ __volatile__(
+        "movl  $3, %%eax    \n"
+        "movl  %2, %%edx    \n"
+        "lcall *%3          \n"
+        "setc  %1           \n"
+        "movl  %%eax, %0    \n"
+        : "=m"(state), "=m"(err)
+        : "g"(port), "m"(vdpmi_entry)
+        : "eax", "ecx", "edx", "ebx", "esi", "edi");
+    return !err && state != 0;
+}
+
+static int vd_set_trap(unsigned port, unsigned on)
+{
+    unsigned char err = 0;
+    __asm__ __volatile__(
+        "movl  $4, %%eax    \n"
+        "movl  %1, %%edx    \n"
+        "movl  %2, %%ecx    \n"
+        "lcall *%3          \n"
+        "setc  %0           \n"
+        : "=m"(err)
+        : "g"(port), "g"(on), "m"(vdpmi_entry)
+        : "eax", "ecx", "edx", "ebx", "esi", "edi");
+    return !err;
+}
+
+/* Arm the one registration that covers both worlds.  The handler slot is
+ * global to the host, so we chain: remember who was there and pass on
+ * anything that is not one of our two ports.  Ports that are trapped
+ * already belong to somebody else - a resident SBEMU emulating an MPU, or
+ * an MPUSHIM that is already in - and we stand down rather than fight for
+ * them, exactly as the HDPMI and QPI sides do.  Returns 1 if armed; 0 with
+ * the reason printed. */
+static int vdpmi_install(void)
+{
+    unsigned short mycs, oldsel = 0;
+    unsigned long oldoff = 0;
+    int i;
+
+    for (i = 0; i < 2; i++) {
+        if (vd_is_trapped(g_data + i)) {
+            outs("VDPMI trap: not armed - ports already trapped"
+                 " (MPUSHIM already resident?)\n");
+            return 0;
+        }
+    }
+    __asm__ __volatile__("movw %%cs, %0" : "=r"(mycs));
+    if (!vd_get_handler(&oldoff, &oldsel)) { oldoff = 0; oldsel = 0; }
+    if (oldsel == mycs) { oldoff = 0; oldsel = 0; }   /* never chain to self */
+    g_vd_old     = oldoff;
+    g_vd_old_sel = oldsel;
+
+    if (!vd_set_handler(mycs, (unsigned long)&mpushim_vd_handler)) {
+        outs("VDPMI trap: not armed - the host refused the handler\n");
+        return 0;
+    }
+    for (i = 0; i < 2; i++) {
+        if (!vd_set_trap(g_data + i, 1)) {
+            while (i-- > 0) vd_set_trap(g_data + i, 0);
+            vd_set_handler(oldsel, oldoff);           /* put the chain back */
+            outs("VDPMI trap: not armed - the host refused the ports\n");
+            return 0;
+        }
+    }
+    return 1;
+}
+
 /* fn 9: trap CLI (BL=0).  CX:EDX = FAR32 handler.  CF set = the resident
  * HDPMI has no CLI/STI trap support (very old build). */
 static int hdpmi_set_cli(void (*handler)(void))
@@ -640,6 +1087,60 @@ static void outhex(unsigned v, int digits)
     for (i = digits - 1; i >= 0; i--) { b[i] = hx[v & 15]; v >>= 4; }
     b[digits] = 0;
     outs(b);
+}
+
+static void outdec(unsigned long v)
+{
+    char b[12];
+    int i = 11;
+    b[11] = 0;
+    if (!v) { outs("0"); return; }
+    while (v && i) { b[--i] = (char)('0' + (int)(v % 10)); v /= 10; }
+    outs(b + i);
+}
+
+/* ---- /DUMP=seg: print the trace block ---------------------------------
+ * Separate from the resident half on purpose.  Under VDPMI the COMrade
+ * link does not survive a DPMI client, so the trace cannot be read off the
+ * machine while the evidence is being made; instead this prints it to
+ * stdout in the SAME boot ("MPUSHIM /DUMP=2745 > TRACE.TXT"), and the file
+ * is collected after a reboot.  Entries come out oldest first. */
+static void dump_trace(unsigned seg)
+{
+    static const char *tagname[5] = {
+        "out data", "out CMD ", "in  data", "in  stat", "DROPPED "
+    };
+    unsigned long lin = (unsigned long)seg << 4;
+    unsigned long idx, tot;
+    unsigned i;
+
+    if (_farpeekl(_dos_ds, lin) != 0x4352544DUL) {
+        outs("MPUSHIM: no trace buffer at that segment.\n");
+        return;
+    }
+    idx = _farpeekl(_dos_ds, lin + 4) & 1023;
+    tot = _farpeekl(_dos_ds, lin + 8);
+    outs("MPUSHIM trace at ");
+    outhex(seg, 4);
+    outs(":0000 - ");
+    outdec(tot);
+    outs(" events\n\nwhat      val  repeat  tick\n");
+    for (i = 0; i < 1024; i++) {
+        unsigned long a = lin + 16 + (((idx + i) & 1023) * 8);
+        unsigned rep = _farpeekw(_dos_ds, a + 2);
+        unsigned char tg;
+        if (!rep) continue;
+        tg = _farpeekb(_dos_ds, a + 1);
+        if (tg > 4) continue;
+        outs(tagname[tg]);
+        outs("   ");
+        outhex(_farpeekb(_dos_ds, a), 2);
+        outs("  ");
+        outdec(rep);
+        outs("   ");
+        outdec(_farpeekl(_dos_ds, a + 4));
+        outs("\n");
+    }
 }
 
 /* ---- tiny arg helpers -------------------------------------------------- */
@@ -691,8 +1192,9 @@ int main(int argc, char **argv)
     unsigned long handle = 0;
     unsigned long psp;
     unsigned div = 0;
-    int nocli = 0, nopm = 0, norm = 0;
-    int hdpmi_ok, qpi_ok, pm_armed = 0, rm_armed = 0;
+    int nocli = 0, nopm = 0, norm = 0, novd = 0, trace = 0;
+    unsigned dumpseg = 0;
+    int hdpmi_ok, qpi_ok, vd_ok, pm_armed = 0, rm_armed = 0, vd_armed = 0;
     __dpmi_regs r;
     int i;
 
@@ -712,30 +1214,52 @@ int main(int argc, char **argv)
         else if (keymatch(a, "MPU="))  g_data = (unsigned short)parse_hex(a + 4);
         else if (keymatch(a, "DIV="))  div    = parse_dec(a + 4);
         else if (keymatch(a, "NOCLI")) nocli = 1;
+        else if (keymatch(a, "NOVD"))  novd = 1;
+        else if (keymatch(a, "DUMP="))  dumpseg = parse_hex(a + 5);
+        else if (keymatch(a, "TRACE1")) { trace = 1; g_tr1 = 1; }
+        else if (keymatch(a, "TRACE"))  trace = 1;
+        else if (keymatch(a, "ACKALL")) g_ackall = 1;
+        else if (keymatch(a, "NOFIFO")) g_nofifo = 1;
         else if (keymatch(a, "NOPM"))  nopm = 1;
         else if (keymatch(a, "NORM"))  norm = 1;
         else {
-            outs("MPUSHIM 0.3 - MPU-401 facade over a serial UART, both trap worlds.\n"
-                 "  MPUSHIM [/UART=250] [/MPU=330] [/DIV=n] [/NORM] [/NOPM]\n"
+            outs("MPUSHIM 0.4 - MPU-401 facade over a serial UART, all trap worlds.\n"
+                 "  MPUSHIM [/UART=250] [/MPU=330] [/DIV=n] [/NORM] [/NOPM] [/NOVD]\n"
                  "  /UART  = serial UART base I/O port (default 250)\n"
                  "  /MPU   = MPU-401 base the game expects (default 330)\n"
                  "  /DIV   = reprogram the UART divisor for 31250 baud\n"
                  "  /NORM  = skip the V86 (QPI) side   /NOPM = skip the PM side\n"
+                 "  /NOVD  = ignore VDPMI, use the QPI + HDPMI pair instead\n"
                  "  /NOCLI = skip the DOS4G PUSHFD/CLI/POPFD interrupt heal\n"
+                 "  diagnostics: /TRACE record traffic  /ACKALL ACK every command\n"
+                 "               /NOFIFO drop bytes when a trap nests (the old bug)\n"
+                 "               /TRACE1 like /TRACE but keeps the FIRST 1024\n"
+                 "               /DUMP=seg print the trace block and exit\n"
                  "Installs its traps and stays resident; start games normally.\n"
-                 "Hosts: HDPMI32i -r -x (DOS4GW games), JEMM+QPIEMU / QEMM / VDPMI"
-                 " (real-mode).\n");
+                 "Hosts: VDPMI alone covers both worlds (Pentium); otherwise\n"
+                 "HDPMI32i -r -x (DOS4GW games) + JEMM+QPIEMU or QEMM (real-mode).\n");
             return 0;
         }
     }
     g_stat = g_data + 1;
 
-    hdpmi_ok = nopm ? 0 : get_hdpmi();
-    qpi_ok   = norm ? 0 : find_qpi();
-    if (!hdpmi_ok && !qpi_ok) {
+    if (dumpseg) { dump_trace(dumpseg); return 0; }
+
+    /* VDPMI first, and on its own: it is a DPMI host AND a V86 monitor
+     * whose port traps fire for ring-3 and V86 clients through one table,
+     * so a single registration there covers everything the QPI blob plus
+     * HDPMI cover between them - and it is the only host on the machine
+     * (it replaces Jemm/QPIEMU/HDPMI32i rather than joining them).  /NOVD
+     * falls back to the pair, which also works under VDPMI's QEMM-style
+     * QPI facade for the V86 half. */
+    vd_ok    = novd ? 0 : get_vendor_api("VDPMI", &vdpmi_entry);
+    hdpmi_ok = (vd_ok || nopm) ? 0 : get_vendor_api("HDPMI", &hdpmi_entry);
+    qpi_ok   = (vd_ok || norm) ? 0 : find_qpi();
+    if (!vd_ok && !hdpmi_ok && !qpi_ok) {
         outs("MPUSHIM: no trap host at all.\n"
-             "  PM side needs HDPMI32i resident (-r -x);\n"
-             "  V86 side needs Jemm+QPIEMU, QEMM or VDPMI.\n");
+             "  VDPMI covers both worlds by itself (Pentium and up);\n"
+             "  otherwise the PM side needs HDPMI32i resident (-r -x)\n"
+             "  and the V86 side needs Jemm+QPIEMU or QEMM.\n");
         return 2;
     }
     /* Already resident?  The V86 core carries 'MSHR' at offset 0 of its own
@@ -771,21 +1295,43 @@ int main(int argc, char **argv)
      * crt0 flag still cannot fault inside a trap. */
     {
         __dpmi_meminfo m;
-        m.address = (unsigned long)&mpushim_out_handler;
-        m.size    = 2048;                /* all three handlers + g_ds_st */
-        __dpmi_lock_linear_region(&m);
-        m.address = (unsigned long)&g_uart;
-        m.size    = 64;
+        m.address = __djgpp_base_address + (unsigned long)&g_ds_st;
+        m.size    = (unsigned long)mpushim_code_end - (unsigned long)&g_ds_st;
+        __dpmi_lock_linear_region(&m);   /* every handler and its .text data */
+        m.address = __djgpp_base_address + (unsigned long)&g_uart;
+        m.size    = 64;                  /* the facade state */
         __dpmi_lock_linear_region(&m);
     }
 
-    outs("MPUSHIM 0.3: MPU-401 ");
+    /* The trace block lives in DOS memory so it can be read from outside
+     * this client entirely - COMrade dumps it straight out of conventional
+     * memory while the game is still running. */
+    if (trace) {
+        int sel, seg = __dpmi_allocate_dos_memory((8192 + 16 + 15) >> 4, &sel);
+        if (seg > 0) {
+            unsigned long lin = (unsigned long)seg << 4;
+            unsigned i;
+            for (i = 0; i < (8192 + 16) / 4; i++) _farpokel(_dos_ds, lin + i * 4, 0);
+            _farpokel(_dos_ds, lin, 0x4352544DUL);      /* 'MTRC' */
+            g_tr_lin = lin;
+            g_dosds  = _dos_ds;
+            g_trace  = 1;
+        }
+    }
+
+    outs("MPUSHIM 0.4: MPU-401 ");
     outhex(g_data, 3);
     outs("/");
     outhex(g_stat, 3);
     outs(" -> UART ");
     outhex(g_uart, 3);
     outs("\n");
+
+    if (vd_ok) {
+        vd_armed = vdpmi_install();
+        if (vd_armed)
+            outs("VDPMI:    armed - one trap, both worlds (V86 + protected)\n");
+    }
 
     if (hdpmi_ok) {
         hdpmi_set_context_mode(0);
@@ -805,6 +1351,8 @@ int main(int argc, char **argv)
                 outs("          (CLI heal unavailable: this HDPMI has no fn 9"
                      " - DOS/4GW games may wedge)\n");
         }
+    } else if (vd_ok) {
+        /* VDPMI's one registration is the PM side too - nothing to say. */
     } else if (nopm) {
         outs("PM trap:  skipped (/NOPM)\n");
     } else {
@@ -814,16 +1362,25 @@ int main(int argc, char **argv)
     if (qpi_ok) {
         rm_armed = rm_install();
         if (rm_armed) outs("V86 trap: armed\n");
+    } else if (vd_ok) {
+        /* likewise the V86 side */
     } else if (norm) {
         outs("V86 trap: skipped (/NORM)\n");
     } else {
-        outs("V86 trap: not armed - no QPI host (JEMM+QPIEMU, QEMM or VDPMI)\n");
+        outs("V86 trap: not armed - no QPI host (JEMM+QPIEMU or QEMM)\n");
     }
 
-    if (!pm_armed && !rm_armed) {
+    if (!pm_armed && !rm_armed && !vd_armed) {
         outs("MPUSHIM: nothing armed - not going resident.\n");
         return 4;
     }
+    if (g_trace) {
+        outs("Trace:    buffer at ");
+        outhex((unsigned)(g_tr_lin >> 4), 4);
+        outs(":0000\n");
+    }
+    if (g_nofifo) outs("          (/NOFIFO: nested traps drop bytes)\n");
+    if (g_ackall) outs("          (/ACKALL: every command is ACKed)\n");
     outs("MPUSHIM: resident.\n");
 
     /* Go resident, the vsbhda way: give DOS back everything but the PSP.
