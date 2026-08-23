@@ -15,6 +15,11 @@ fi
 nasm -f bin "$HERE/MPUSHIMR.ASM" -o "$HERE/MPUSHIMR.BIN"
 ( cd "$HERE" && xxd -i -n mpushimr_bin MPUSHIMR.BIN > mpushimr.h )
 
+# the 16-bit protected-mode half: its own .COM, because only a 16-bit DPMI
+# client can register with HDPMI16i (see MPUSHM16.ASM)
+nasm -f bin "$HERE/MPUSHM16.ASM" -o "$HERE/MPUSHM16.COM"
+echo "MPUSHM16.COM: $(wc -c < "$HERE/MPUSHM16.COM") bytes"
+
 docker run --rm --platform linux/amd64 \
   -v "$HERE":/build -v "$DJGPP_DIR":/opt/djgpp:ro \
   -w /build debian:stable-slim bash -c '

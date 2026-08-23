@@ -1,8 +1,9 @@
 # MPUSHIM — an MPU-401 facade over a plain serial UART
 
 Makes a bare serial-UART MIDI interface look like an **MPU-401 at 330h**, so
-DOS games can use it for music. One resident binary covers both trap worlds:
-real-mode (V86) games and 32-bit DPMI/DOS4GW games.
+DOS games can use it for music. One resident binary covers both trap worlds —
+real-mode (V86) games and 32-bit DPMI/DOS4GW games — under any of the three
+host arrangements below.
 
 ## The problem
 
@@ -40,13 +41,25 @@ Anything whose MIDI output is a 16550-compatible UART. Two worked examples:
 
 ## Requirements
 
-A trap host for each world. Either alone works — each side installs and
-reports separately.
+A trap host. On a 386 or 486 that means one per world — either alone works,
+each side installs and reports separately. On a Pentium, VDPMI can do both by
+itself.
 
-| World | Host |
-|---|---|
-| Real-mode (V86) games | JEMM386 + QPIEMU, QEMM, or VDPMI (386+) |
-| DPMI / DOS4GW games | `HDPMI32I -r -x` (the IOPL-0 variant) |
+| World | Host | Shim | CPU |
+|---|---|---|---|
+| Real-mode (V86) games | JEMM386 + QPIEMU, or QEMM | `MPUSHIM.EXE` | 386+ |
+| 32-bit DPMI / DOS4GW games | `HDPMI32I -r -x` | `MPUSHIM.EXE` | 386+ |
+| 16-bit DPMI games | `HDPMI16I -r -x` | `MPUSHM16.COM` | 386+ |
+| **all three, one host** | **VDPMI** | `MPUSHIM.EXE` | **Pentium+** |
+
+[VDPMI](https://github.com/crazii/SBEMU/releases) is crazii's DPMI host with
+its own V86 monitor; its port traps fire for ring-3 and V86 clients through
+one table, so MPUSHIM makes a single registration and covers everything —
+one resident instead of three, and no HDPMI CLI heal needed (VDPMI's virtual
+interrupts do not have the IOPL-0 `POPFD` hole that heal exists for). It is
+detected first and used alone; `/NOVD` ignores it and uses the QPI + HDPMI
+pair instead. VDPMI executes RDTSC and RDMSR with no CPUID guard, so it needs
+a Pentium; the QPI + HDPMI stack is 386+ and runs on a Pentium unchanged.
 
 The UART must already be enabled and set to 31250 baud — by its card enabler,
 or with `/DIV`. If a dynamically loaded JEMM has claimed extended memory, give
@@ -55,11 +68,12 @@ HDPMI32i `-v` so it takes memory via VCPI instead.
 ## Usage
 
 ```
-MPUSHIM [/UART=250] [/MPU=330] [/DIV=n] [/NORM] [/NOPM] [/NOCLI]
+MPUSHIM [/UART=250] [/MPU=330] [/DIV=n] [/NORM] [/NOPM] [/NOVD] [/NOCLI]
   /UART  serial UART base I/O port (default 250)
   /MPU   MPU-401 base the game expects (default 330; status = base+1)
   /DIV   reprogram the UART divisor for 31250 baud
   /NORM  skip the real-mode side      /NOPM  skip the protected-mode side
+  /NOVD  ignore VDPMI; use the QPI + HDPMI pair instead
   /NOCLI skip the DOS/4G PUSHFD/CLI/POPFD interrupt heal
 ```
 
@@ -81,9 +95,12 @@ and you type the bare name.
 | | |
 |---|---|
 | `MPUSHIM.EXE` | the shim |
-| `GOALL.BAT` | both worlds |
-| `GOPM.BAT` | protected mode only |
+| `GOALL.BAT` | the full stack: all three worlds at once |
+| `GOPM.BAT` | 32-bit protected mode only |
 | `GORM.BAT` | real mode only |
+| `GOVDP.BAT` | all three worlds through VDPMI alone (Pentium) |
+| `GO16.BAT` | 16-bit protected-mode games (HDPMI16i) |
+| `MPUSHM16.COM` | the 16-bit protected-mode shim |
 | `GO232.BAT` | serial-MIDI dongle on a COM port |
 | `tools/PMPOKE.EXE` | protected-mode smoke test |
 | `tools/PMSTORM`, `PMISR`, `PMHOG` | trap throughput, ISR-context, memory pressure |
@@ -92,12 +109,13 @@ and you type the bare name.
 ## Build
 
 ```
-./build-pm.sh                       MPUSHIM.EXE (nasm + DJGPP in docker)
-cd legacy && ./BUILD.BAT            the standalone TSR (nasm)
+./build-pm.sh                       MPUSHIM.EXE + MPUSHM16.COM
+cd legacy && ./BUILD.BAT            the standalone real-mode TSR (nasm)
 ```
 
 `build-pm.sh` assembles the embedded real-mode core (`MPUSHIMR.ASM`) flat,
-embeds it with `xxd -i`, then cross-compiles `MPUSHIM.C`.
+embeds it with `xxd -i`, cross-compiles `MPUSHIM.C`, and assembles the 16-bit
+shim (`MPUSHM16.ASM`) as a .COM.
 
 ## Notes
 
@@ -106,21 +124,44 @@ embeds it with `xxd -i`, then cross-compiles `MPUSHIM.C`.
   for GM titles.
 - A dongle fed at 38400 takes dense SysEx slightly faster than MIDI drains.
   Fine for game music.
-- Not covered: **16-bit** DPMI clients (a separate registration), MPU-401
-  **intelligent mode**, and VCPI-only extenders.
+- Under VDPMI, if a DOS/4GW game stutters or wedges once music is playing,
+  load VDPMI with `/PVI=0`. crazii's own VDPMI.TXT names the case ("some old
+  dos extenders or programs (e.g. DMX in doom) may have glitches/sound
+  stutters with /PVI=1"), and it is the same critical-section-versus-virtual-
+  interrupts problem the HDPMI CLI heal exists for, reached from the other
+  side: with PVI on, a ring-3 `POPFD` cannot restore the virtual interrupt
+  flag its matching `PUSHFD` saved.
+- **16-bit DPMI clients need `MPUSHM16.COM`, not `MPUSHIM.EXE`.** HDPMI16
+  and HDPMI32 are separate hosts built from one source (`?32BIT=0/1`), and
+  `AX=168Ah` returns the API of the host serving the *calling* client — so a
+  32-bit program can never register a trap for a 16-bit game. `MPUSHM16` is a
+  plain .COM that becomes a 16-bit DPMI client itself and installs FAR16
+  handlers. Both may be resident together; load HDPMI16 first.
+- Not covered: MPU-401 **intelligent mode**, and VCPI-only extenders.
 
 ## Provenance and licence
 
 **MPUSHIM is GNU General Public License v2** (see `COPYING`), Copyright (C)
 2026 zikolas.
 
-It is GPL rather than permissive for one specific reason: the DOS/4G CLI heal
+It is GPL rather than permissive because two pieces of it derive from GPL v2
+sources, each attributed at the function it belongs to.
+
+First, the DOS/4G CLI heal
 in `mpushim_cli_handler()` is derived from **VSBHDA**'s `_hdpmi_CliHandler`
 (`src/stackio.asm`), Copyright (C) Baron-von-Riedesel, GPL v2 — the same
 register discipline, the same "was this CLI preceded by a PUSHFD?" test with
 the same opcode constants, and the same re-enable through DPMI 0901h. The
 resident-TSR teardown sequence follows VSBHDA's too. Copyright in those parts
 stays with their author.
+
+Second, **VDPMI's vendor API is not documented anywhere** — VDPMI.TXT does not
+mention it and VDPMI itself is not yet open source. The ABI `mpushim_vd_handler()`
+and the `vd_*` calls implement is the one **SBEMU**'s client driver for VDPMI
+(`vdpmi.c`, Copyright (C) crazii, GPL v2) describes by using it: the vendor
+signature, the function numbers, the trap handler's argument frame and far
+return, and the chain-to-the-previous-handler convention. Copyright in that
+description stays with its author.
 
 Everything else is original work against published interfaces:
 
