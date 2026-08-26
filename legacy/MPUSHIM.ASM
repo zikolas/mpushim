@@ -77,6 +77,16 @@ mpu_stat  dw 0331h                    ; MPU status/command port
 ackpend   db 0                        ; 1 = 0FEh ACK waiting to be read
 uartmode  db 0                        ; 1 = UART mode entered (informational)
 drops     dw 0                        ; TX bytes dropped (UART stayed full)
+lsr_off   dw 5                        ; LSR offset from uart_base. 5 for an
+                                      ; ordinary UART; 10 where the registers
+                                      ; are spaced 2 bytes apart (/STRIDE=2),
+                                      ; as on the TDK DMC-8000's onboard 16550
+                                      ; at 320h. Precomputed at install so the
+                                      ; trap handler stays a single ADD.
+synthax   dw 0                        ; MIDI sink: 0 = the UART, else the AX
+                                      ; for INT 2Fh - AH a resident software
+                                      ; synth's multiplex id, AL its "MIDI
+                                      ; byte in DL" function (/SYNTH)
 
 ;==========================================================================
 ;  trap_handler - the QPI real-mode port-trap callback.
@@ -164,8 +174,11 @@ trap_handler:
         push cx
         push dx
         mov  bl, al                   ; the MIDI byte
+        mov  ax, cs:[synthax]         ; a resident synth instead of a UART?
+        test ax, ax
+        jnz  .send_synth
         mov  dx, cs:[uart_base]
-        add  dx, 5                    ; LSR
+        add  dx, cs:[lsr_off]         ; LSR
         mov  cx, 0FFFFh               ; bounded spin (~ one byte-time margin)
 .send_wait:
         in   al, dx
@@ -184,6 +197,25 @@ trap_handler:
         pop  bx
         pop  ax
         retf
+
+; ---- hand the byte to a resident INT 2Fh software synth instead ----------
+; AX is already synthax.  .send has saved AX/BX/CX/DX; the callee synthesises
+; the note on the guest's stack and is only contracted to preserve what a
+; multiplex handler normally does, so save the rest as well.
+.send_synth:
+        mov  dl, bl
+        push si
+        push di
+        push bp
+        push ds
+        push es
+        int  2Fh
+        pop  es
+        pop  ds
+        pop  bp
+        pop  di
+        pop  si
+        jmp  .send_done
 
 resident_end:                         ; everything below is discarded on TSR
 
@@ -220,6 +252,21 @@ init:
         jmp  do_unload
 
 .install:
+        ; Publish the LSR offset the trap handler will use, so the hot path is
+        ; one ADD rather than a shift per byte.
+        push cx
+        mov  cl, [ushift]
+        mov  ax, 5
+        shl  ax, cl
+        mov  [lsr_off], ax
+        pop  cx
+
+        ; A synth sink has no UART behind it, so neither the divisor program
+        ; nor the LSR probe applies - and both would poke an I/O port that
+        ; on this machine may belong to something else entirely.
+        cmp  word [synthax], 0
+        jne  .nouart
+
         ; optional divisor (re)program
         cmp  byte [f_div], 0
         je   .nodiv
@@ -227,8 +274,8 @@ init:
 .nodiv:
         ; sanity: is the UART actually decoding?  LSR of a dead/absent port
         ; floats FFh.  Warn but continue (the game test is the real check).
-        mov  dx, [uart_base]
-        add  dx, 5
+        mov  al, 5                    ; LSR, wherever the stride puts it
+        call uart_reg
         in   al, dx
         mov  [r_lsr], al
         cmp  al, 0FFh
@@ -236,6 +283,7 @@ init:
         mov  si, m_deaduart
         call prstr
 .live:
+.nouart:
 
         ; --- get + save the current QPI trap handler --------------------
         mov  ax, 1A06h
@@ -269,10 +317,23 @@ init:
         call prchar
         mov  ax, [mpu_stat]
         call prhex3
+        cmp  word [synthax], 0
+        jne  .rep_synth
         mov  si, m_ok2
         call prstr
         mov  ax, [uart_base]
         call prhex3
+        cmp  byte [ushift], 0
+        je   .rep_end
+        mov  si, m_stride2
+        call prstr
+        jmp  .rep_end
+.rep_synth:
+        mov  si, m_oksyn
+        call prstr
+        mov  al, [synthax+1]          ; the multiplex id
+        call prhex2
+.rep_end:
         mov  si, m_ok3
         call prstr
 
@@ -396,35 +457,59 @@ do_unload:
 ;  MCR/IER 0.  Only used when /DIV was given; normally EXPG3GO has already
 ;  set the UART and we leave it untouched.
 ;==========================================================================
+; DX = uart_base + (AL << ushift), i.e. the port of logical 16550 register AL.
+; Registers are one byte apart on an ordinary UART and two on a card that puts
+; an 8-bit UART on a 16-bit bus, so nothing here may use INC DX to step from
+; one register to the next.  Clobbers AX and CX.
+uart_reg:
+        push cx
+        mov  cl, [ushift]
+        xor  ah, ah
+        shl  ax, cl
+        add  ax, [uart_base]
+        mov  dx, ax
+        pop  cx
+        ret
+
 uart_setdiv:
         push ax
+        push cx
         push dx
-        mov  dx, [uart_base]
-        add  dx, 3                    ; LCR: DLAB on
+        mov  al, 3                    ; LCR: DLAB on
+        call uart_reg
         mov  al, 80h
         out  dx, al
-        mov  dx, [uart_base]          ; divisor low
+        mov  al, 0                    ; divisor low
+        call uart_reg
         mov  al, [o_div]
         out  dx, al
-        inc  dx                       ; divisor high = 0
+        mov  al, 1                    ; divisor high = 0
+        call uart_reg
         xor  al, al
         out  dx, al
-        mov  dx, [uart_base]
-        add  dx, 3                    ; LCR: 8N1, DLAB off
+        mov  al, 3                    ; LCR: 8N1, DLAB off
+        call uart_reg
         mov  al, 03h
         out  dx, al
-        inc  dx                       ; MCR = 0
+        mov  al, 4                    ; MCR = 0
+        call uart_reg
         xor  al, al
         out  dx, al
-        mov  dx, [uart_base]
-        inc  dx                       ; IER = 0
+        mov  al, 1                    ; IER = 0
+        call uart_reg
         xor  al, al
         out  dx, al
-        mov  dx, [uart_base]
-        add  dx, 2                    ; FCR: FIFOs on
-        mov  al, 01h
+        mov  al, 2                    ; FCR: FIFOs OFF
+        call uart_reg
+        ; With the FIFO enabled, LSR bit 5 only sets once the WHOLE transmit
+        ; FIFO has drained, so the send loop would wait a full byte-time
+        ; before every byte and halve throughput on dense MIDI. 16450
+        ; semantics - THRE means room for one more byte - is what pacing
+        ; wants, and we never receive.
+        xor  al, al
         out  dx, al
         pop  dx
+        pop  cx
         pop  ax
         ret
 
@@ -453,7 +538,15 @@ parse_args:
         je   .m
         cmp  al, 'D'
         je   .d
+        cmp  al, 'S'
+        je   .s
         jmp  .loop
+.s:                                   ; /SYNTH vs /STRIDE, on the 2nd letter
+        mov  al, [si]
+        and  al, 0DFh
+        cmp  al, 'T'
+        je   .stride
+        jmp  .synth
 .u:
         ; /U (unload) vs /UART=
         mov  al, [si]
@@ -483,6 +576,25 @@ parse_args:
         jz   .loop
         mov  [o_div], dl
         mov  byte [f_div], 1
+        jmp  .loop
+.stride:                              ; /STRIDE=1|2  (16550 register spacing)
+        call eat_eq
+        call decnum
+        mov  byte [ushift], 0
+        cmp  dx, 2
+        jne  .loop
+        mov  byte [ushift], 1
+        jmp  .loop
+.synth:                               ; /SYNTH[=ah]
+        call eat_eq
+        call hexnum
+        test dx, dx
+        jnz  .s_have
+        mov  dx, 0BDh                 ; the default multiplex id
+.s_have:
+        mov  dh, dl                   ; id -> AH
+        mov  dl, 01h                  ; AL = "MIDI byte in DL"
+        mov  [synthax], dx
         jmp  .loop
 .help:
         mov  byte [f_help], 1
@@ -624,12 +736,19 @@ f_help    db 0
 f_div     db 0
 o_div     db 24
 r_lsr     db 0
+ushift    db 0                        ; 0 = registers 1 byte apart (/STRIDE=1),
+                                      ; 1 = 2 bytes apart (/STRIDE=2)
 
-m_banner    db 'MPUSHIM 0.1 - MPU-401 UART facade over a serial UART',13,10,0
-m_help      db 'Usage: MPUSHIM [/UART=250] [/MPU=330] [/DIV=24] [/U] [/?]',13,10
+m_banner    db 'MPUSHIM 0.1 - MPU-401 facade, real-mode (V86) only',13,10,0
+m_help      db 'Usage: MPUSHIM [/UART=250] [/MPU=330] [/DIV=24] [/SYNTH]',13,10
+            db '               [/STRIDE=n] [/U] [/?]',13,10
             db '  /UART=hex  serial UART base (default 250h)',13,10
             db '  /MPU=hex   MPU-401 base the game expects (default 330h)',13,10
             db '  /DIV=dec   reprogram UART divisor for 31250 (G3 wants 24)',13,10
+            db '  /SYNTH[=ah] send MIDI to a resident INT 2Fh software synth',13,10
+            db '             instead of a UART (default id BDh)',13,10
+            db '  /STRIDE=n  UART register spacing: 1 (normal) or 2, for an',13,10
+            db '             8-bit UART on a 16-bit bus (TDK DMC-8000 at 320h)',13,10
             db '  /U         unload   /?  help',13,10
             db 'Needs VDPMI (or QEMM / Jemm+QPIEMU) resident, and the card',13,10
             db 'enabled first (EXPG3GO /PCIC - native UART, no /MPU).',13,10,0
@@ -639,6 +758,8 @@ m_deaduart  db 'WARNING: UART LSR reads FF - is the card enabled? '
             db '(run EXPG3GO /PCIC)',13,10,0
 m_ok1       db 'Installed: MPU-401 at ',0
 m_ok2       db ' -> UART ',0
+m_oksyn     db ' -> synth INT 2Fh AH=',0
+m_stride2   db ' (regs 2 apart)',0
 m_ok3       db '. Resident.',13,10,0
 m_unloaded  db 'MPUSHIM unloaded.',13,10,0
 m_notres    db 'No resident MPUSHIM found to unload.',13,10,0

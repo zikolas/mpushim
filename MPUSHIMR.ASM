@@ -10,6 +10,11 @@
 ;  HANDLER_OFF.  All memory references are CS-relative, so org-0 offsets
 ;  are correct as-is.
 ;
+;  The MIDI sink is selectable at install time: the UART transmitter, or a
+;  resident software synthesiser reached over an INT 2Fh multiplex (MPUSHIM
+;  /SYNTH).  The facade above it - status model, ACK, reset broadcast - is
+;  identical either way; only send_bl differs.
+;
 ;  This is MPUSHIM.COM 0.1's bench-proven resident core, brought to parity
 ;  with the protected-mode facade: same status model (always write-ready),
 ;  ACK on reset/UART-mode, all-notes-off broadcast on reset, and a paced
@@ -35,6 +40,10 @@ mpu_stat  dw 0331h                    ; +8   MPU status/command port
 ackpend   db 0                        ; +10  1 = 0FEh ACK waiting
 uartmode  db 0                        ; +11  informational
 drops     dw 0                        ; +12  TX bytes dropped (UART dead)
+synthax   dw 0                        ; +14  MIDI sink: 0 = the UART, else the
+                                      ;      AX for INT 2Fh - AH the resident
+                                      ;      synth's multiplex id, AL its
+                                      ;      "MIDI byte in DL" function
 
         times 16-($-$$) db 0          ; assembler guard: entry stays at +16
 
@@ -121,9 +130,14 @@ handler:
 .st_done:
         retf
 
-; ---- BL -> UART transmitter; bounded THRE spin, drop only if dead --------
+; ---- BL -> the MIDI sink -------------------------------------------------
+; The UART transmitter, bounded THRE spin, dropping only if it is dead; or,
+; where the installer patched synthax, a resident software synth over INT 2Fh.
 ; clobbers AX, CX, DX (callers save around it)
 send_bl:
+        mov  ax, cs:[synthax]         ; a resident synth instead of a UART?
+        test ax, ax
+        jnz  send_synth
         mov  dx, cs:[uart_base]
         add  dx, 5                    ; LSR
         mov  cx, 0FFFFh               ; generous bound; never a hang
@@ -139,6 +153,28 @@ send_bl:
         mov  al, bl
         out  dx, al
 .done:
+        ret
+
+; ---- BL -> a resident INT 2Fh synth (AX is already synthax) ---------------
+; The callee synthesises the note on OUR stack and is only contracted to
+; preserve what a multiplex handler normally does, so save everything send_bl
+; promises its own callers - BX above all, which carries the reset
+; broadcast's channel counter in BH.
+send_synth:
+        mov  dl, bl
+        push bx
+        push si
+        push di
+        push bp
+        push ds
+        push es
+        int  2Fh
+        pop  es
+        pop  ds
+        pop  bp
+        pop  di
+        pop  si
+        pop  bx
         ret
 
 blob_end:

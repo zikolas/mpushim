@@ -114,6 +114,7 @@
 #define RBLOB_UART   4    /* state-header offsets, must match MPUSHIMR.ASM */
 #define RBLOB_DATA   6
 #define RBLOB_STAT   8
+#define RBLOB_SYNTH 14    /* MIDI sink: 0 = the UART, else the INT 2Fh AX  */
 #define RBLOB_ENTRY  16   /* QPI handler entry offset inside the blob */
 
 /* Lock every page of this program at startup and keep sbrk from moving the
@@ -125,6 +126,11 @@ int _crt0_startup_flags = _CRT0_FLAG_LOCK_MEMORY | _CRT0_FLAG_NONMOVE_SBRK;
 volatile unsigned short g_uart = 0x250;  /* serial UART base I/O port       */
 volatile unsigned short g_data = 0x330;  /* MPU data port                   */
 volatile unsigned short g_stat = 0x331;  /* MPU status/command port         */
+/* MIDI sink for the V86 blob: 0 = the UART, else the AX handed to INT 2Fh -
+ * AH a resident software synth's multiplex id, AL 01h its "byte in DL"
+ * function.  /SYNTH sets it; the PM facade has no equivalent yet, so /SYNTH
+ * confines MPUSHIM to the V86 world (see where it is parsed). */
+unsigned short g_synth = 0;
 volatile unsigned char  g_ack  = 0;      /* 1 = 0FEh ACK waiting to be read */
 volatile unsigned char  g_busy = 0;      /* 1 = a handler is already active */
 /* Diagnostics (v0.4, for the Tyrian stall hunt - see the trace notes below) */
@@ -896,6 +902,7 @@ static int rm_install(void)
     _farpokew(_dos_ds, home + RBLOB_UART, g_uart);
     _farpokew(_dos_ds, home + RBLOB_DATA, g_data);
     _farpokew(_dos_ds, home + RBLOB_STAT, g_stat);
+    _farpokew(_dos_ds, home + RBLOB_SYNTH, g_synth);
 
     memset(&r, 0, sizeof r);
     r.x.ax = 0x1A07;                               /* set trap handler */
@@ -1187,6 +1194,20 @@ static void uart_setdiv(unsigned base, unsigned div)
     outportb(base + 2, 0x00);            /* FCR: FIFOs OFF (see below) */
 }
 
+/* Is anything resident on that INT 2Fh multiplex id?  AL=00 is the usual
+ * install check and a handler that owns the id answers AL=0FFh.  We do not
+ * verify any particular signature: the sink is deliberately generic, and the
+ * only thing worth telling the user is that the far end is empty. */
+static int synth_present(unsigned short ax)
+{
+    __dpmi_regs r;
+    memset(&r, 0, sizeof r);
+    r.h.ah = (unsigned char)(ax >> 8);
+    r.h.al = 0x00;
+    __dpmi_int(0x2F, &r);
+    return (r.h.al == 0xFF);
+}
+
 int main(int argc, char **argv)
 {
     unsigned long handle = 0;
@@ -1222,6 +1243,9 @@ int main(int argc, char **argv)
         else if (keymatch(a, "NOFIFO")) g_nofifo = 1;
         else if (keymatch(a, "NOPM"))  nopm = 1;
         else if (keymatch(a, "NORM"))  norm = 1;
+        else if (keymatch(a, "SYNTH="))
+            g_synth = (unsigned short)((parse_hex(a + 6) << 8) | 0x01);
+        else if (keymatch(a, "SYNTH")) g_synth = 0xBD01;
         else {
             outs("MPUSHIM 0.4 - MPU-401 facade over a serial UART, all trap worlds.\n"
                  "  MPUSHIM [/UART=250] [/MPU=330] [/DIV=n] [/NORM] [/NOPM] [/NOVD]\n"
@@ -1229,6 +1253,9 @@ int main(int argc, char **argv)
                  "  /MPU   = MPU-401 base the game expects (default 330)\n"
                  "  /DIV   = reprogram the UART divisor for 31250 baud\n"
                  "  /NORM  = skip the V86 (QPI) side   /NOPM = skip the PM side\n"
+                 "  /SYNTH[=ah] = send MIDI to a resident INT 2Fh software\n"
+                 "           synth instead of the UART (default id BDh).\n"
+                 "           V86 games only - the PM side still needs a UART.\n"
                  "  /NOVD  = ignore VDPMI, use the QPI + HDPMI pair instead\n"
                  "  /NOCLI = skip the DOS4G PUSHFD/CLI/POPFD interrupt heal\n"
                  "  diagnostics: /TRACE record traffic  /ACKALL ACK every command\n"
@@ -1242,6 +1269,12 @@ int main(int argc, char **argv)
         }
     }
     g_stat = g_data + 1;
+
+    /* The synth sink lives in the V86 blob and nowhere else.  VDPMI covers
+     * both worlds with ONE registration, and that registration is the 32-bit
+     * facade whose data path still ends at a UART - so /SYNTH must neither
+     * use VDPMI nor claim the protected-mode side. */
+    if (g_synth) { novd = 1; nopm = 1; }
 
     if (dumpseg) { dump_trace(dumpseg); return 0; }
 
@@ -1281,14 +1314,14 @@ int main(int argc, char **argv)
     }
 
     __asm__ __volatile__("movw %%ds, %0" : "=m"(g_ds_st));
-    if (div) uart_setdiv(g_uart, div);
+    if (div && !g_synth) uart_setdiv(g_uart, div);
 
     /* FIFOs OFF regardless of who programmed the UART: with the FIFO on,
      * LSR bit 5 only sets when ALL 16 slots are empty, which turns both
      * our DRR status bit and the transmit wait into "wait for the whole
      * FIFO to drain".  16450 semantics (THRE = room for one byte) is what
      * MIDI pacing wants, and we never use RX at all. */
-    outportb(g_uart + 2, 0x00);
+    if (!g_synth) outportb(g_uart + 2, 0x00);   /* no UART in synth mode */
 
     /* _CRT0_FLAG_LOCK_MEMORY already locked the image; lock the handler code
      * and the facade state again explicitly so a future build that drops the
@@ -1323,9 +1356,19 @@ int main(int argc, char **argv)
     outhex(g_data, 3);
     outs("/");
     outhex(g_stat, 3);
-    outs(" -> UART ");
-    outhex(g_uart, 3);
-    outs("\n");
+    if (g_synth) {
+        outs(" -> synth INT 2Fh AH=");
+        outhex((unsigned)(g_synth >> 8), 2);
+        outs("\n");
+        if (!synth_present(g_synth))
+            outs("          WARNING: nothing answers that id - load the"
+                 " synth TSR\n");
+        outs("          V86 games only (the PM side needs a UART)\n");
+    } else {
+        outs(" -> UART ");
+        outhex(g_uart, 3);
+        outs("\n");
+    }
 
     if (vd_ok) {
         vd_armed = vdpmi_install();
