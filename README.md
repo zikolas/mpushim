@@ -37,7 +37,7 @@ Anything whose MIDI output is a 16550-compatible UART. Two worked examples:
 * **Serdaco [MPU-232](https://www.serdashop.com/MPU-232)** — an RS-232-to-MIDI
   dongle on a plain COM port, so a machine with no sound card and no free slot
   still gets game MIDI. DIP switches all OFF (38400 baud, binary):
-  `/UART=3F8 /DIV=3`, as in `GO232.BAT`.
+  `/UART=3F8 /DIV=3`, as in `GOC232.BAT`.
 
 ## Requirements
 
@@ -95,13 +95,26 @@ and you type the bare name.
 | | |
 |---|---|
 | `MPUSHIM.EXE` | the shim |
-| `GOALL.BAT` | the full stack: all three worlds at once |
-| `GOPM.BAT` | 32-bit protected mode only |
-| `GORM.BAT` | real mode only |
-| `GOVDP.BAT` | all three worlds through VDPMI alone (Pentium) |
-| `GO16.BAT` | 16-bit protected-mode games (HDPMI16i) |
 | `MPUSHM16.COM` | the 16-bit protected-mode shim |
-| `GO232.BAT` | serial-MIDI dongle on a COM port |
+
+The GO launchers carry a card letter after `GO`: **E** = EXP GAME/MIDI
+(UART at 250), **C** = MPU-232 dongle on a COM port, **W** = CF-VEW212
+wavetable (the OPL4 synth stack, [vew212-opl4](../vew212-opl4)),
+**T** = TDK DMC-8000/9000.
+
+| | |
+|---|---|
+| `GOEALL.BAT` | EXP: the full stack, all three worlds at once |
+| `GOEPM.BAT` | EXP: 32-bit protected mode only |
+| `GOERM.BAT` | EXP: real mode only |
+| `GOEVDP.BAT` | EXP: all three worlds through VDPMI alone (Pentium) |
+| `GOE16.BAT` | EXP: 16-bit protected-mode games (HDPMI16i) |
+| `GOC232.BAT` | serial-MIDI dongle on a COM port |
+| `GOWMIDI.BAT` | VEW212: wavetable MIDI, all three worlds |
+| `GOW32.BAT` | VEW212: wavetable MIDI + VSBPCM digital (32-bit games) |
+| `GOW16.BAT` | VEW212: wavetable MIDI + VSBPCM16 digital (16-bit games) |
+| `GOTSYN.BAT` | TDK: MIDI to the card's own EMU8000 synth |
+| `GOTDIN.BAT` | TDK: MIDI out of the card's DIN socket |
 | `tools/PMPOKE.EXE` | protected-mode smoke test |
 | `tools/PMSTORM`, `PMISR`, `PMHOG` | trap throughput, ISR-context, memory pressure |
 | `legacy/MPUSHIM.COM` | the standalone real-mode TSR |

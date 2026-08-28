@@ -1,4 +1,5 @@
 @echo off
+rem UART 3F8 = COM1 - never on a box whose COMRADE link is COM1
 C:\MPUSHIM\JEMM386.EXE LOAD NOEMS
 cd \MPUSHIM
 JLOAD QPIEMU.DLL
