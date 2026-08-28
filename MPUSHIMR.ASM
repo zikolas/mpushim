@@ -44,10 +44,13 @@ synthax   dw 0                        ; +14  MIDI sink: 0 = the UART, else the
                                       ;      AX for INT 2Fh - AH the resident
                                       ;      synth's multiplex id, AL its
                                       ;      "MIDI byte in DL" function
+lsr_off   dw 5                        ; +16  LSR offset from uart_base: 5, or
+                                      ;      10 for a 16550 with registers 2
+                                      ;      apart (/STRIDE=2, TDK DMC-8000)
 
-        times 16-($-$$) db 0          ; assembler guard: entry stays at +16
+        times 18-($-$$) db 0          ; assembler guard: entry stays at +18
 
-; ---- the QPI trap handler (entry: blob offset 16) ------------------------
+; ---- the QPI trap handler (entry: blob offset 18) ------------------------
 handler:
         test cl, 38h                  ; word/dword/string: not modelled
         jnz  .absorb
@@ -139,7 +142,7 @@ send_bl:
         test ax, ax
         jnz  send_synth
         mov  dx, cs:[uart_base]
-        add  dx, 5                    ; LSR
+        add  dx, cs:[lsr_off]         ; LSR, wherever the stride puts it
         mov  cx, 0FFFFh               ; generous bound; never a hang
 .wait:
         in   al, dx

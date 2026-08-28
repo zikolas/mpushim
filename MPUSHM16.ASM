@@ -12,7 +12,7 @@
 ;  port trap through HDPMI16i's vendor API with FAR16 handlers, locks
 ;  itself down and stays resident.  Games are then started normally.
 ;
-;      MPUSHM16 [/UART=250] [/MPU=330] [/SYNTH[=id]]
+;      MPUSHM16 [/UART=250] [/MPU=330] [/DIV=n] [/STRIDE=n] [/SYNTH[=id]]
 ;
 ;  /SYNTH replaces the UART sink: each MIDI byte is handed to the resident
 ;  real-mode INT 2Fh synth (OPL4SYN, default id BDh) through DPMI 0300h,
@@ -68,7 +68,7 @@
         cpu  386
         org  100h
 
-%define VERSION '0.2'
+%define VERSION '0.3'
 
 start:  jmp  init
 
@@ -85,6 +85,9 @@ uartmode  db 0                       ; informational
 drops     dw 0                       ; TX bytes dropped (UART dead)
 synthax   dw 0                       ; MIDI sink: 0 = the UART, else the AX
                                      ; for a real-mode INT 2Fh synth (/SYNTH)
+lsr_off   dw 5                       ; LSR offset from uart_base: 5, or 10
+                                     ; for a 16550 with registers 2 apart
+                                     ; (/STRIDE=2, the TDK DMC-8000's DIN)
 
 ;==========================================================================
 ; OUT handler - the client wrote a byte to a trapped MPU port
@@ -234,7 +237,7 @@ send_bl:
         cmp  word [synthax], 0
         jne  sb_synth
         mov  dx, [uart_base]
-        add  dx, 5                   ; LSR
+        add  dx, [lsr_off]           ; LSR, wherever the stride puts it
         mov  cx, 800                 ; >> one byte time; guards dead hw
 sb_wait:
         in   al, dx
@@ -319,12 +322,15 @@ m_nopm     db 'Could not enter protected mode.',13,10,'$'
 m_noapi    db 'No HDPMI vendor API (is this HDPMI16i, the IOPL-0 build?).',13,10,'$'
 m_notrap   db 'Trap refused - ports already trapped, or no free range.',13,10,'$'
 m_ok       db 'PM trap: armed. Resident.',13,10,'$'
-m_syn      db 'MIDI -> INT 2Fh synth (OPL4SYN); test note sent.',13,10,'$'
-m_help     db 'MPUSHM16 [/UART=250] [/MPU=330] [/SYNTH[=id]]',13,10
+m_syn      db 'MIDI -> the resident INT 2Fh synth; test note sent.',13,10,'$'
+m_help     db 'MPUSHM16 [/UART=250] [/MPU=330] [/DIV=n] [/STRIDE=n] [/SYNTH[=id]]',13,10
            db '  Traps the MPU ports for 16-BIT DPMI clients (Borland RTM,',13,10
            db '  Phar Lap 286, DOS/16M).  Needs HDPMI16I -r -x resident.',13,10
+           db '  /DIV reprograms the UART divisor for 31250 baud; /STRIDE=2',13,10
+           db '  for a 16550 with registers 2 apart (TDK DIN: /UART=320',13,10
+           db '  /STRIDE=2 /DIV=5).',13,10
            db '  /SYNTH sends MIDI to the resident real-mode INT 2Fh synth',13,10
-           db '  (OPL4SYN, default id BDh) instead of a UART.',13,10
+           db '  (OPL4SYN, TDKSYN, default id BDh) instead of a UART.',13,10
            db '  32-bit DOS4GW games are the job of MPUSHIM.EXE; both may',13,10
            db '  be resident together.',13,10,'$'
 
@@ -361,6 +367,72 @@ gh_add:
 gh_done:
         ret
 
+;--- parse a decimal number at DS:SI into AX (stops at the first non-digit)
+getdec:
+        xor  ax, ax
+gd_loop:
+        mov  bl, [si]
+        cmp  bl, '0'
+        jb   gd_done
+        cmp  bl, '9'
+        ja   gd_done
+        sub  bl, '0'
+        xor  bh, bh
+        imul ax, ax, 10
+        add  ax, bx
+        inc  si
+        jmp  gd_loop
+gd_done:
+        ret
+
+;--- DX = uart_base + (AL << ushift): logical 16550 register -> port ------
+ureg:
+        push cx
+        push ax
+        mov  cl, [ushift]
+        xor  ah, ah
+        shl  ax, cl
+        add  ax, [uart_base]
+        mov  dx, ax
+        pop  ax
+        pop  cx
+        ret
+
+;--- program the UART: 8N1, divisor o_div, FIFOs off (as the other cores) -
+setdiv:
+        mov  al, 3
+        call ureg
+        mov  al, 80h                 ; LCR: DLAB
+        out  dx, al
+        mov  al, 0
+        call ureg
+        mov  al, [o_div]             ; DLL
+        out  dx, al
+        mov  al, 1
+        call ureg
+        mov  al, [o_div+1]           ; DLM
+        out  dx, al
+        mov  al, 3
+        call ureg
+        mov  al, 03h                 ; LCR: 8N1, DLAB off
+        out  dx, al
+        mov  al, 4
+        call ureg
+        xor  al, al                  ; MCR = 0
+        out  dx, al
+        mov  al, 1
+        call ureg
+        xor  al, al                  ; IER = 0
+        out  dx, al
+        mov  al, 2
+        call ureg
+        xor  al, al                  ; FCR: FIFOs off (16450 THRE pacing)
+        out  dx, al
+        ret
+
+ushift    db 0                       ; 0 = registers 1 byte apart, 1 = 2 apart
+o_div     dw 0                       ; /DIV value; 0 = leave the UART alone
+
 init:
         mov  sp, stack_top           ; stack inside the image, so the
                                      ; shrink below cannot cut it off
@@ -387,12 +459,33 @@ cl_opt:
         je   cl_uart
         cmp  al, 'M'                 ; /MPU=
         je   cl_mpu
-        cmp  al, 'S'                 ; /SYNTH[=id]
-        je   cl_syn
+        cmp  al, 'D'                 ; /DIV=
+        je   cl_div
+        cmp  al, 'S'                 ; /SYNTH or /STRIDE, on the 2nd letter
+        je   cl_s
         mov  dx, m_help              ; anything else: help and quit
         call say
         mov  ax, 4C00h
         int  21h
+cl_div:
+        add  si, 4                   ; past "DIV="
+        call getdec
+        mov  [o_div], ax
+        jmp  cl_loop
+cl_s:
+        mov  al, [si+1]
+        and  al, 0DFh
+        cmp  al, 'T'                 ; /STRIDE=1|2  (16550 register spacing)
+        jne  cl_syn
+        add  si, 7                   ; past "STRIDE="
+        call getdec
+        mov  byte [ushift], 0
+        mov  word [lsr_off], 5
+        cmp  ax, 2
+        jne  cl_loop
+        mov  byte [ushift], 1
+        mov  word [lsr_off], 10
+        jmp  cl_loop
 cl_syn:
         mov  al, [si+5]
         cmp  al, '='
@@ -421,6 +514,16 @@ cl_mpu:
         mov  [mpu_stat], ax
         jmp  cl_loop
 cl_done:
+
+;--- optional UART (re)program - real mode, so plain OUTs; a synth sink
+;--- has no UART behind it and both the divisor and FIFO pokes would land
+;--- on someone else's ports ----------------------------------------------
+        cmp  word [synthax], 0
+        jne  cl_nodiv
+        cmp  word [o_div], 0
+        je   cl_nodiv
+        call setdiv
+cl_nodiv:
 
 ;--- is there a DPMI host, and is it the 16-bit one? ----------------------
         mov  ax, 1687h

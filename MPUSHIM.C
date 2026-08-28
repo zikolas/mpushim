@@ -115,7 +115,8 @@
 #define RBLOB_DATA   6
 #define RBLOB_STAT   8
 #define RBLOB_SYNTH 14    /* MIDI sink: 0 = the UART, else the INT 2Fh AX  */
-#define RBLOB_ENTRY  16   /* QPI handler entry offset inside the blob */
+#define RBLOB_LSR   16    /* LSR offset from the UART base: 5, or 10 at stride 2 */
+#define RBLOB_ENTRY  18   /* QPI handler entry offset inside the blob */
 
 /* Lock every page of this program at startup and keep sbrk from moving the
  * image.  The trap handler can be entered at any time - including while
@@ -124,6 +125,10 @@ int _crt0_startup_flags = _CRT0_FLAG_LOCK_MEMORY | _CRT0_FLAG_NONMOVE_SBRK;
 
 /* ---- facade state, shared with the asm handlers ------------------------ */
 volatile unsigned short g_uart = 0x250;  /* serial UART base I/O port       */
+volatile unsigned short g_lsr  = 0x255;  /* its LSR: g_uart + (5 << stride
+                                          * shift) - 10 for a 16550 with
+                                          * registers 2 apart (/STRIDE=2,
+                                          * the TDK DMC-8000's DIN)        */
 volatile unsigned short g_data = 0x330;  /* MPU data port                   */
 volatile unsigned short g_stat = 0x331;  /* MPU status/command port         */
 /* MIDI sink: 0 = the UART, else the AX handed to INT 2Fh - AH a resident
@@ -389,8 +394,7 @@ asm(
 "   mov  al, [_g_ftail]                                             \n"
 "   cmp  al, [_g_fhead]                                             \n"
 "   je   o_tx_end              # queue empty: done                  \n"
-"   mov  dx, [_g_uart]                                              \n"
-"   add  dx, 5                 # LSR                                \n"
+"   mov  dx, [_g_lsr]          # LSR, wherever the stride puts it   \n"
 "   mov  ecx, 800              # ~1ms of reads >> one byte time     \n"
 "o_tx_wait:                                                         \n"
 "   in   al, dx                                                     \n"
@@ -420,8 +424,7 @@ asm(
 "   pop  eax                                                        \n"
 "   ret                                                             \n"
 "o_tx_direct:                                                       \n"
-"   mov  dx, [_g_uart]                                              \n"
-"   add  dx, 5                                                      \n"
+"   mov  dx, [_g_lsr]                                               \n"
 "   mov  ecx, 800                                                   \n"
 "o_txd_wait:                                                        \n"
 "   in   al, dx                                                     \n"
@@ -940,6 +943,7 @@ static int rm_install(void)
     _farpokew(_dos_ds, home + RBLOB_DATA, g_data);
     _farpokew(_dos_ds, home + RBLOB_STAT, g_stat);
     _farpokew(_dos_ds, home + RBLOB_SYNTH, g_synth);
+    _farpokew(_dos_ds, home + RBLOB_LSR, (unsigned short)(g_lsr - g_uart));
 
     memset(&r, 0, sizeof r);
     r.x.ax = 0x1A07;                               /* set trap handler */
@@ -1219,16 +1223,18 @@ static unsigned parse_dec(const char *s)
     return v;
 }
 
-/* ---- optional UART (re)program: 8N1, given divisor, FIFOs on ----------- */
-static void uart_setdiv(unsigned base, unsigned div)
+/* ---- optional UART (re)program: 8N1, given divisor, FIFOs on -----------
+ * sh = the register-stride shift: 0 for a normal 16550, 1 where the
+ * registers sit 2 bytes apart (/STRIDE=2).                               */
+static void uart_setdiv(unsigned base, unsigned div, unsigned sh)
 {
-    outportb(base + 3, 0x80);            /* DLAB */
-    outportb(base + 0, div & 0xFF);
-    outportb(base + 1, (div >> 8) & 0xFF);
-    outportb(base + 3, 0x03);            /* 8N1 */
-    outportb(base + 4, 0x00);            /* MCR = 0 */
-    outportb(base + 1, 0x00);            /* IER = 0 */
-    outportb(base + 2, 0x00);            /* FCR: FIFOs OFF (see below) */
+    outportb(base + (3 << sh), 0x80);    /* DLAB */
+    outportb(base + (0 << sh), div & 0xFF);
+    outportb(base + (1 << sh), (div >> 8) & 0xFF);
+    outportb(base + (3 << sh), 0x03);    /* 8N1 */
+    outportb(base + (4 << sh), 0x00);    /* MCR = 0 */
+    outportb(base + (1 << sh), 0x00);    /* IER = 0 */
+    outportb(base + (2 << sh), 0x00);    /* FCR: FIFOs OFF (see below) */
 }
 
 /* Is anything resident on that INT 2Fh multiplex id?  AL=00 is the usual
@@ -1249,7 +1255,7 @@ int main(int argc, char **argv)
 {
     unsigned long handle = 0;
     unsigned long psp;
-    unsigned div = 0;
+    unsigned div = 0, ush = 0;
     int nocli = 0, nopm = 0, norm = 0, novd = 0, trace = 0;
     unsigned dumpseg = 0;
     int hdpmi_ok, qpi_ok, vd_ok, pm_armed = 0, rm_armed = 0, vd_armed = 0;
@@ -1271,6 +1277,7 @@ int main(int argc, char **argv)
         if      (keymatch(a, "UART=")) g_uart = (unsigned short)parse_hex(a + 5);
         else if (keymatch(a, "MPU="))  g_data = (unsigned short)parse_hex(a + 4);
         else if (keymatch(a, "DIV="))  div    = parse_dec(a + 4);
+        else if (keymatch(a, "STRIDE=")) ush  = (parse_dec(a + 7) == 2) ? 1 : 0;
         else if (keymatch(a, "NOCLI")) nocli = 1;
         else if (keymatch(a, "NOVD"))  novd = 1;
         else if (keymatch(a, "DUMP="))  dumpseg = parse_hex(a + 5);
@@ -1284,11 +1291,14 @@ int main(int argc, char **argv)
             g_synth = (unsigned short)((parse_hex(a + 6) << 8) | 0x01);
         else if (keymatch(a, "SYNTH")) g_synth = 0xBD01;
         else {
-            outs("MPUSHIM 0.6 - MPU-401 facade over a serial UART, all trap worlds.\n"
-                 "  MPUSHIM [/UART=250] [/MPU=330] [/DIV=n] [/NORM] [/NOPM] [/NOVD]\n"
+            outs("MPUSHIM 0.7 - MPU-401 facade over a serial UART, all trap worlds.\n"
+                 "  MPUSHIM [/UART=250] [/MPU=330] [/DIV=n] [/STRIDE=n] [/NORM] [/NOPM]\n"
                  "  /UART  = serial UART base I/O port (default 250)\n"
                  "  /MPU   = MPU-401 base the game expects (default 330)\n"
                  "  /DIV   = reprogram the UART divisor for 31250 baud\n"
+                 "  /STRIDE= UART register spacing: 1 (normal) or 2, for a\n"
+                 "           16550 on a 16-bit window (TDK DIN: /UART=320\n"
+                 "           /STRIDE=2 /DIV=5)\n"
                  "  /NORM  = skip the V86 (QPI) side   /NOPM = skip the PM side\n"
                  "  /SYNTH[=ah] = send MIDI to a resident INT 2Fh software synth\n"
                  "           (OPL4SYN, TDKSYN, ...; default id BDh) instead of\n"
@@ -1306,6 +1316,7 @@ int main(int argc, char **argv)
         }
     }
     g_stat = g_data + 1;
+    g_lsr  = g_uart + (5 << ush);
 
     /* /SYNTH covers every world: the V86 blob delivers natively and the PM
      * handler reflects through DPMI 0300h.  VDPMI stays refused - it can
@@ -1350,14 +1361,14 @@ int main(int argc, char **argv)
     }
 
     __asm__ __volatile__("movw %%ds, %0" : "=m"(g_ds_st));
-    if (div && !g_synth) uart_setdiv(g_uart, div);
+    if (div && !g_synth) uart_setdiv(g_uart, div, ush);
 
     /* FIFOs OFF regardless of who programmed the UART: with the FIFO on,
      * LSR bit 5 only sets when ALL 16 slots are empty, which turns both
      * our DRR status bit and the transmit wait into "wait for the whole
      * FIFO to drain".  16450 semantics (THRE = room for one byte) is what
      * MIDI pacing wants, and we never use RX at all. */
-    if (!g_synth) outportb(g_uart + 2, 0x00);   /* no UART in synth mode */
+    if (!g_synth) outportb(g_uart + (2 << ush), 0x00);   /* no UART in synth mode */
 
     /* _CRT0_FLAG_LOCK_MEMORY already locked the image; lock the handler code
      * and the facade state again explicitly so a future build that drops the
@@ -1388,7 +1399,7 @@ int main(int argc, char **argv)
         }
     }
 
-    outs("MPUSHIM 0.6: MPU-401 ");
+    outs("MPUSHIM 0.7: MPU-401 ");
     outhex(g_data, 3);
     outs("/");
     outhex(g_stat, 3);
