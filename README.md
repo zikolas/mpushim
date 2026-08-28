@@ -1,9 +1,11 @@
-# MPUSHIM — an MPU-401 facade over a plain serial UART
+# MPUSHIM — an MPU-401 facade for DOS games
 
-Makes a bare serial-UART MIDI interface look like an **MPU-401 at 330h**, so
-DOS games can use it for music. One resident binary covers both trap worlds —
-real-mode (V86) games and 32-bit DPMI/DOS4GW games — under any of the three
-host arrangements below.
+Makes a MIDI sink with no MPU-401 behind it — a bare serial-UART interface,
+or a resident software synth driving a sound card's wavetable — look like an
+**MPU-401 at 330h**, so DOS games can use it for music. MPUSHIM.EXE covers
+the real-mode (V86) and 32-bit DPMI/DOS4GW worlds; the small MPUSHM16.COM
+beside it adds 16-bit protected-mode games, so all three trap worlds play
+from one boot under the host arrangements below.
 
 ## The problem
 
@@ -22,8 +24,9 @@ Traps the two MPU ports (`330h` data, `331h` status/command) and:
   only while an ACK is pending, so drain loops terminate;
 - answers **reset (`FFh`)** and **enter-UART-mode (`3Fh`)** with the `FEh` ACK,
   and broadcasts All-Notes-Off on reset as real MPU-401 silicon does;
-- **forwards MIDI bytes** to the UART transmitter, paced on the Line Status
-  Register. Bytes are never dropped.
+- **forwards MIDI bytes** to the sink: a UART transmitter (any register
+  stride), paced on the Line Status Register — or a resident INT 2Fh synth
+  (`/SYNTH`). Bytes are never dropped.
 
 ## Interfaces
 
