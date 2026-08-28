@@ -95,6 +95,57 @@ Unlike the EXE it can unload itself. Keep it out of the shim's own directory:
 DOS runs `MPUSHIM.COM` in preference to `MPUSHIM.EXE` when both are present
 and you type the bare name.
 
+## Card recipes
+
+The launchers in `go/` wrap these, but the switches stand on their own.
+Load order is always: the card's enabler, then the synth TSR if one is
+involved, then the trap hosts (see Requirements), then the shims.
+
+**CF-VEW212 internal wavetable**
+([vew21xgo](https://github.com/zikolas/vew21xgo) enabler + its OPL4SYN):
+
+    VEW21XGO
+    OPL4SYN
+    ...trap hosts...
+    MPUSHM16 /SYNTH
+    MPUSHIM  /SYNTH
+
+Both synth TSRs answer the default multiplex id (BDh), so bare `/SYNTH`
+is the whole configuration; `/SYNTH=xx` pairs with a synth loaded with
+`/ID=xx`.
+
+**TDK MC-8000/DMC-9000 internal wavetable**
+([mc8kgo](https://github.com/zikolas/mc8kgo) enabler + its TDKSYN):
+
+    MC8KGO
+    TDKSYN
+    ...trap hosts...
+    MPUSHM16 /SYNTH
+    MPUSHIM  /SYNTH
+
+**TDK MC-8000/DMC-9000 MIDI DIN** — external gear (a real MT-32/CM-32L
+or GM module) on the card's DIN socket:
+
+    MC8KGO
+    ...trap hosts...
+    MPUSHM16 /UART=320 /STRIDE=2
+    MPUSHIM  /UART=320 /STRIDE=2 /DIV=5
+
+The card's DIN is an onboard 16550 living in a 16-bit window, so its
+registers sit 2 bytes apart — that is `/STRIDE=2`, and every shim aimed
+at this UART needs it. Its clock wants divisor 5 for MIDI's 31250 baud;
+`/DIV=5` programs the UART once, from whichever shim carries it — the
+.EXE in the recipe above, MPUSHM16 if it is the only shim loaded, or the
+real-mode `legacy` .COM on a V86-only boot (`/UART=320 /STRIDE=2
+/DIV=5` there too).
+
+**EXP Game Traveler / MPU-232**: see Interfaces — `/UART=250` (the EXP
+card's default) and `/UART=3F8 /DIV=3` respectively, both at the normal
+register stride.
+
+Each shim has ONE sink per boot: the wavetable and the DIN are a choice,
+made per shim at load time.
+
 ## Files
 
 | | |
