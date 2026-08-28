@@ -102,24 +102,26 @@ and you type the bare name.
 | `MPUSHIM.EXE` | the shim |
 | `MPUSHM16.COM` | the 16-bit protected-mode shim |
 
-The GO launchers carry a card letter after `GO`: **E** = EXP GAME/MIDI
-(UART at 250), **C** = MPU-232 dongle on a COM port, **W** = CF-VEW212
-wavetable (the OPL4 synth stack, [vew212-opl4](../vew212-opl4)),
-**T** = TDK DMC-8000/9000.
+The GO launchers live in `go/` and carry a card letter after `GO`:
+**E** = EXP GAME/MIDI (UART at 250), **C** = MPU-232 dongle on a COM
+port, **W** = CF-VEW212 wavetable (the OPL4 synth stack,
+[vew212-opl4](../vew212-opl4)), **T** = TDK DMC-8000/9000 (enabled by
+[MC8KGO](https://github.com/zikolas/mc8kgo)). They assume everything in
+one directory on the box; adjust paths to taste.
 
 | | |
 |---|---|
-| `GOEALL.BAT` | EXP: the full stack, all three worlds at once |
-| `GOEPM.BAT` | EXP: 32-bit protected mode only |
-| `GOERM.BAT` | EXP: real mode only |
-| `GOEVDP.BAT` | EXP: all three worlds through VDPMI alone (Pentium) |
-| `GOE16.BAT` | EXP: 16-bit protected-mode games (HDPMI16i) |
-| `GOC232.BAT` | serial-MIDI dongle on a COM port |
-| `GOWMIDI.BAT` | VEW212: wavetable MIDI, all three worlds |
-| `GOW32.BAT` | VEW212: wavetable MIDI + VSBPCM digital (32-bit games) |
-| `GOW16.BAT` | VEW212: wavetable MIDI + VSBPCM16 digital (16-bit games) |
-| `GOTSYN.BAT` | TDK: MIDI to the card's own EMU8000 synth |
-| `GOTDIN.BAT` | TDK: MIDI out of the card's DIN socket |
+| `go/GOEALL.BAT` | EXP: the full stack, all three worlds at once |
+| `go/GOEPM.BAT` | EXP: 32-bit protected mode only |
+| `go/GOERM.BAT` | EXP: real mode only |
+| `go/GOEVDP.BAT` | EXP: all three worlds through VDPMI alone (Pentium) |
+| `go/GOE16.BAT` | EXP: 16-bit protected-mode games (HDPMI16i) |
+| `go/GOC232.BAT` | serial-MIDI dongle on a COM port |
+| `go/GOWMIDI.BAT` | VEW212: wavetable MIDI, all three worlds |
+| `go/GOW32.BAT` | VEW212: wavetable MIDI + VSBPCM digital (32-bit games) |
+| `go/GOW16.BAT` | VEW212: wavetable MIDI + VSBPCM16 digital (16-bit games) |
+| `go/GOTSYN.BAT` | TDK: MIDI to the card's own EMU8000 synth |
+| `go/GOTDIN.BAT` | TDK: MIDI out of the card's DIN socket |
 | `tools/PMPOKE.EXE` | protected-mode smoke test |
 | `tools/PMSTORM`, `PMISR`, `PMHOG` | trap throughput, ISR-context, memory pressure |
 | `legacy/MPUSHIM.COM` | the standalone real-mode TSR |
