@@ -69,6 +69,14 @@ detected first and used alone; `/NOVD` ignores it and uses the QPI + HDPMI
 pair instead. VDPMI executes RDTSC and RDMSR with no CPUID guard, so it needs
 a Pentium; the QPI + HDPMI stack is 386+ and runs on a Pentium unchanged.
 
+Where to get the hosts: JEMM386, JLOAD and the QPIEMU.DLL module ship
+together in [Jemm](https://github.com/Baron-von-Riedesel/Jemm); HDPMI16i and
+HDPMI32i ship in the [HX](https://github.com/Baron-von-Riedesel/HX) runtime.
+Take both HDPMI builds from the SAME HX release and load HDPMI16i first — a
+mixed pair silently refuses to join (the second host never prints "now
+resident" and its clients see no DPMI; this cost a bench evening). QEMM is
+the commercial-era alternative QPI provider.
+
 The UART must already be enabled and set to 31250 baud — by its card enabler,
 or with `/DIV`. If a dynamically loaded JEMM has claimed extended memory, give
 HDPMI32i `-v` so it takes memory via VCPI instead.
