@@ -41,7 +41,7 @@ Anything whose MIDI output is a 16550-compatible UART. Two worked examples:
 * **Resident software synths** - `/SYNTH[=id]` delivers each byte to an
   INT 2Fh synth TSR instead of a UART, in every world (the protected-mode
   sides reflect through DPMI 0300h). Two exist so far: OPL4SYN (the
-  CF-VEW212's OPL4 wavetable) and TDKSYN (the TDK DMC-8000/9000's
+  CF-VEW212's OPL4 wavetable) and TDKSYN (the TDK MC-8000/DMC-9000's
   EMU8000); both are still to be released.
 
 ## Requirements
@@ -105,7 +105,7 @@ and you type the bare name.
 The GO launchers live in `go/` and carry a card letter after `GO`:
 **E** = EXP GAME/MIDI (UART at 250), **C** = MPU-232 dongle on a COM
 port, **W** = CF-VEW212 wavetable (the OPL4 synth stack; its
-OPL4SYN TSR is not yet released), **T** = TDK DMC-8000/9000 (enabled by
+OPL4SYN TSR is not yet released), **T** = TDK MC-8000/DMC-9000 (enabled by
 [MC8KGO](https://github.com/zikolas/mc8kgo)). They assume everything in
 one directory on the box; adjust paths to taste.
 

@@ -80,7 +80,7 @@ drops     dw 0                        ; TX bytes dropped (UART stayed full)
 lsr_off   dw 5                        ; LSR offset from uart_base. 5 for an
                                       ; ordinary UART; 10 where the registers
                                       ; are spaced 2 bytes apart (/STRIDE=2),
-                                      ; as on the TDK DMC-8000's onboard 16550
+                                      ; as on the TDK MC-8000's onboard 16550
                                       ; at 320h. Precomputed at install so the
                                       ; trap handler stays a single ADD.
 synthax   dw 0                        ; MIDI sink: 0 = the UART, else the AX
@@ -748,7 +748,7 @@ m_help      db 'Usage: MPUSHIM [/UART=250] [/MPU=330] [/DIV=24] [/SYNTH]',13,10
             db '  /SYNTH[=ah] send MIDI to a resident INT 2Fh software synth',13,10
             db '             instead of a UART (default id BDh)',13,10
             db '  /STRIDE=n  UART register spacing: 1 (normal) or 2, for an',13,10
-            db '             8-bit UART on a 16-bit bus (TDK DMC-8000 at 320h)',13,10
+            db '             8-bit UART on a 16-bit bus (TDK MC-8000 at 320h)',13,10
             db '  /U         unload   /?  help',13,10
             db 'Needs VDPMI (or QEMM / Jemm+QPIEMU) resident, and the card',13,10
             db 'enabled first (EXPG3GO /PCIC - native UART, no /MPU).',13,10,0

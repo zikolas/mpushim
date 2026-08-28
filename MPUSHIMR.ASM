@@ -46,7 +46,7 @@ synthax   dw 0                        ; +14  MIDI sink: 0 = the UART, else the
                                       ;      "MIDI byte in DL" function
 lsr_off   dw 5                        ; +16  LSR offset from uart_base: 5, or
                                       ;      10 for a 16550 with registers 2
-                                      ;      apart (/STRIDE=2, TDK DMC-8000)
+                                      ;      apart (/STRIDE=2, TDK MC-8000)
 
         times 18-($-$$) db 0          ; assembler guard: entry stays at +18
 

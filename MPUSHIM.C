@@ -128,7 +128,7 @@ volatile unsigned short g_uart = 0x250;  /* serial UART base I/O port       */
 volatile unsigned short g_lsr  = 0x255;  /* its LSR: g_uart + (5 << stride
                                           * shift) - 10 for a 16550 with
                                           * registers 2 apart (/STRIDE=2,
-                                          * the TDK DMC-8000's DIN)        */
+                                          * the TDK MC-8000's DIN)        */
 volatile unsigned short g_data = 0x330;  /* MPU data port                   */
 volatile unsigned short g_stat = 0x331;  /* MPU status/command port         */
 /* MIDI sink: 0 = the UART, else the AX handed to INT 2Fh - AH a resident

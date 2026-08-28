@@ -87,7 +87,7 @@ synthax   dw 0                       ; MIDI sink: 0 = the UART, else the AX
                                      ; for a real-mode INT 2Fh synth (/SYNTH)
 lsr_off   dw 5                       ; LSR offset from uart_base: 5, or 10
                                      ; for a 16550 with registers 2 apart
-                                     ; (/STRIDE=2, the TDK DMC-8000's DIN)
+                                     ; (/STRIDE=2, the TDK MC-8000's DIN)
 
 ;==========================================================================
 ; OUT handler - the client wrote a byte to a trapped MPU port
