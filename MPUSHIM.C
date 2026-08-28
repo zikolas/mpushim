@@ -128,8 +128,9 @@ volatile unsigned short g_data = 0x330;  /* MPU data port                   */
 volatile unsigned short g_stat = 0x331;  /* MPU status/command port         */
 /* MIDI sink for the V86 blob: 0 = the UART, else the AX handed to INT 2Fh -
  * AH a resident software synth's multiplex id, AL 01h its "byte in DL"
- * function.  /SYNTH sets it; the PM facade has no equivalent yet, so /SYNTH
- * confines MPUSHIM to the V86 world (see where it is parsed). */
+ * function.  /SYNTH sets it; on its own it confines MPUSHIM to the V86
+ * world.  The PM facade's equivalent is /OPL4, whose engine is compiled
+ * into this image (see where both are parsed). */
 unsigned short g_synth = 0;
 volatile unsigned char  g_ack  = 0;      /* 1 = 0FEh ACK waiting to be read */
 volatile unsigned char  g_busy = 0;      /* 1 = a handler is already active */
@@ -146,6 +147,16 @@ volatile unsigned char  g_fifo[256];
 volatile unsigned char  g_fhead = 0;
 volatile unsigned char  g_ftail = 0;
 volatile unsigned char  g_drain = 0;     /* 1 = somebody is already draining it */
+
+/* /OPL4: the PM facade renders MIDI on the OPL4 wavetable ITSELF - the
+ * engine and its instrument tables are compiled into this image
+ * (OPL4ENG.H, from the vew212-opl4 repo) and o_tx hands each byte to it
+ * instead of a UART.  The V86 blob still delivers over INT 2Fh to the
+ * resident RM synth (OPL4SYN), so one flag covers both worlds with one
+ * engine per world. */
+volatile unsigned char  g_pmsynth = 0;
+static unsigned         g_opl4base = 0x388;
+#include "OPL4ENG.H"
 
 extern unsigned short   g_ds_st;         /* our DS - lives IN .text (see below) */
 extern unsigned long    g_vd_old;        /* VDPMI: the handler before us,  */
@@ -332,6 +343,24 @@ asm(
  * if the UART is genuinely dead - the bound guards absent hardware, nothing
  * else.  /NOFIFO restores the old behaviour for A/B tests.               */
 "o_tx:                                                              \n"
+/* /OPL4: the byte goes to the compiled-in engine, not a UART.  DS is ours
+ * (every caller set it); give the C code ES=DS too and preserve the rest.
+ * The engine bypasses g_fifo - under HDPMI the handler cannot be
+ * preempted, and /OPL4 refuses VDPMI at install (see OPL4ENG.H).      */
+"   cmp  byte ptr [_g_pmsynth], 0                                   \n"
+"   je   o_tx_hw                                                    \n"
+"   pushad                                                          \n"
+"   push es                                                         \n"
+"   push ds                                                         \n"
+"   pop  es                                                         \n"
+"   movzx eax, bl                                                   \n"
+"   push eax                                                        \n"
+"   call _syn_byte_eng                                              \n"
+"   add  esp, 4                                                     \n"
+"   pop  es                                                         \n"
+"   popad                                                           \n"
+"   ret                                                             \n"
+"o_tx_hw:                                                           \n"
 "   push eax                                                        \n"
 "   push ebx                                                        \n"
 "   push ecx                                                        \n"
@@ -1246,8 +1275,10 @@ int main(int argc, char **argv)
         else if (keymatch(a, "SYNTH="))
             g_synth = (unsigned short)((parse_hex(a + 6) << 8) | 0x01);
         else if (keymatch(a, "SYNTH")) g_synth = 0xBD01;
+        else if (keymatch(a, "OPL4=")) { g_pmsynth = 1; g_opl4base = parse_hex(a + 5); }
+        else if (keymatch(a, "OPL4"))  g_pmsynth = 1;
         else {
-            outs("MPUSHIM 0.4 - MPU-401 facade over a serial UART, all trap worlds.\n"
+            outs("MPUSHIM 0.5 - MPU-401 facade over a serial UART, all trap worlds.\n"
                  "  MPUSHIM [/UART=250] [/MPU=330] [/DIV=n] [/NORM] [/NOPM] [/NOVD]\n"
                  "  /UART  = serial UART base I/O port (default 250)\n"
                  "  /MPU   = MPU-401 base the game expects (default 330)\n"
@@ -1256,6 +1287,9 @@ int main(int argc, char **argv)
                  "  /SYNTH[=ah] = send MIDI to a resident INT 2Fh software\n"
                  "           synth instead of the UART (default id BDh).\n"
                  "           V86 games only - the PM side still needs a UART.\n"
+                 "  /OPL4[=388] = render MIDI on the OPL4 wavetable: the PM side\n"
+                 "           with this binary's own engine, the V86 side via the\n"
+                 "           /SYNTH sink (load OPL4SYN).  Refuses VDPMI.\n"
                  "  /NOVD  = ignore VDPMI, use the QPI + HDPMI pair instead\n"
                  "  /NOCLI = skip the DOS4G PUSHFD/CLI/POPFD interrupt heal\n"
                  "  diagnostics: /TRACE record traffic  /ACKALL ACK every command\n"
@@ -1270,11 +1304,17 @@ int main(int argc, char **argv)
     }
     g_stat = g_data + 1;
 
-    /* The synth sink lives in the V86 blob and nowhere else.  VDPMI covers
-     * both worlds with ONE registration, and that registration is the 32-bit
-     * facade whose data path still ends at a UART - so /SYNTH must neither
-     * use VDPMI nor claim the protected-mode side. */
-    if (g_synth) { novd = 1; nopm = 1; }
+    /* /OPL4: the PM side renders on the compiled-in engine and the V86 blob
+     * delivers to the resident RM synth over INT 2Fh (default id unless
+     * /SYNTH= overrode it).  VDPMI is refused: it can preempt a trap
+     * handler and this engine's guards are deliberately no-ops (OPL4ENG.H).
+     * Plain /SYNTH without /OPL4 is unchanged: the sink lives in the V86
+     * blob and nowhere else, so it must neither use VDPMI nor claim the
+     * protected-mode side. */
+    if (g_pmsynth) {
+        novd = 1;
+        if (!g_synth) g_synth = 0xBD01;
+    } else if (g_synth) { novd = 1; nopm = 1; }
 
     if (dumpseg) { dump_trace(dumpseg); return 0; }
 
@@ -1352,11 +1392,27 @@ int main(int argc, char **argv)
         }
     }
 
-    outs("MPUSHIM 0.4: MPU-401 ");
+    if (g_pmsynth && !syn_init(g_opl4base)) {
+        outs("MPUSHIM: no OPL4 answers at ");
+        outhex(g_opl4base, 3);
+        outs(" - run the card enabler (VEW21XGO) first.\n");
+        return 3;
+    }
+
+    outs("MPUSHIM 0.5: MPU-401 ");
     outhex(g_data, 3);
     outs("/");
     outhex(g_stat, 3);
-    if (g_synth) {
+    if (g_pmsynth) {
+        outs(" -> OPL4 wavetable at ");
+        outhex(g_opl4base, 3);
+        outs(" (PM side: internal engine)\n          V86 side -> synth INT 2Fh AH=");
+        outhex((unsigned)(g_synth >> 8), 2);
+        outs("\n");
+        if (!synth_present(g_synth))
+            outs("          WARNING: nothing answers that id - load OPL4SYN"
+                 " for V86 games\n");
+    } else if (g_synth) {
         outs(" -> synth INT 2Fh AH=");
         outhex((unsigned)(g_synth >> 8), 2);
         outs("\n");
