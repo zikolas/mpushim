@@ -104,8 +104,8 @@ and you type the bare name.
 
 The GO launchers live in `go/` and carry a card letter after `GO`:
 **E** = EXP GAME/MIDI (UART at 250), **C** = MPU-232 dongle on a COM
-port, **W** = CF-VEW212 wavetable (the OPL4 synth stack,
-[vew212-opl4](../vew212-opl4)), **T** = TDK DMC-8000/9000 (enabled by
+port, **W** = CF-VEW212 wavetable (the OPL4 synth stack; its
+OPL4SYN TSR is not yet released), **T** = TDK DMC-8000/9000 (enabled by
 [MC8KGO](https://github.com/zikolas/mc8kgo)). They assume everything in
 one directory on the box; adjust paths to taste.
 
