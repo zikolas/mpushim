@@ -38,6 +38,11 @@ Anything whose MIDI output is a 16550-compatible UART. Two worked examples:
   dongle on a plain COM port, so a machine with no sound card and no free slot
   still gets game MIDI. DIP switches all OFF (38400 baud, binary):
   `/UART=3F8 /DIV=3`, as in `GOC232.BAT`.
+* **Resident software synths** - `/SYNTH[=id]` delivers each byte to an
+  INT 2Fh synth TSR instead of a UART, in every world (the protected-mode
+  sides reflect through DPMI 0300h). Two exist so far: OPL4SYN (the
+  CF-VEW212's OPL4 wavetable, from vew212-opl4) and TDKSYN (the TDK
+  DMC-8000/9000's EMU8000).
 
 ## Requirements
 

@@ -126,11 +126,12 @@ int _crt0_startup_flags = _CRT0_FLAG_LOCK_MEMORY | _CRT0_FLAG_NONMOVE_SBRK;
 volatile unsigned short g_uart = 0x250;  /* serial UART base I/O port       */
 volatile unsigned short g_data = 0x330;  /* MPU data port                   */
 volatile unsigned short g_stat = 0x331;  /* MPU status/command port         */
-/* MIDI sink for the V86 blob: 0 = the UART, else the AX handed to INT 2Fh -
- * AH a resident software synth's multiplex id, AL 01h its "byte in DL"
- * function.  /SYNTH sets it; on its own it confines MPUSHIM to the V86
- * world.  The PM facade's equivalent is /OPL4, whose engine is compiled
- * into this image (see where both are parsed). */
+/* MIDI sink: 0 = the UART, else the AX handed to INT 2Fh - AH a resident
+ * software synth's multiplex id, AL 01h its "byte in DL" function
+ * (/SYNTH).  The V86 blob calls the synth natively; the PM facade reaches
+ * the SAME real-mode synth through DPMI 0300h (synth_rm_byte below), so
+ * one resident synth TSR serves every world and this binary carries no
+ * synth engine of its own. */
 unsigned short g_synth = 0;
 volatile unsigned char  g_ack  = 0;      /* 1 = 0FEh ACK waiting to be read */
 volatile unsigned char  g_busy = 0;      /* 1 = a handler is already active */
@@ -148,15 +149,22 @@ volatile unsigned char  g_fhead = 0;
 volatile unsigned char  g_ftail = 0;
 volatile unsigned char  g_drain = 0;     /* 1 = somebody is already draining it */
 
-/* /OPL4: the PM facade renders MIDI on the OPL4 wavetable ITSELF - the
- * engine and its instrument tables are compiled into this image
- * (OPL4ENG.H, from the vew212-opl4 repo) and o_tx hands each byte to it
- * instead of a UART.  The V86 blob still delivers over INT 2Fh to the
- * resident RM synth (OPL4SYN), so one flag covers both worlds with one
- * engine per world. */
-volatile unsigned char  g_pmsynth = 0;
-static unsigned         g_opl4base = 0x388;
-#include "OPL4ENG.H"
+/* /SYNTH, PM side: hand one MIDI byte to the resident real-mode INT 2Fh
+ * synth through DPMI 0300h - the reflection MPUSHM16 0.2 proved safe from
+ * inside a trap handler (precedent for DPMI calls in that context: the
+ * CLI-heal's own int 31h fn 0901h).  The static regs block is safe
+ * because HDPMI dispatches handlers with the real IF clear, so this can
+ * never be re-entered - and /SYNTH refuses VDPMI, which could preempt. */
+static __dpmi_regs synth_regs;
+void __attribute__((used)) synth_rm_byte(unsigned b)
+{
+    synth_regs.x.ax = g_synth;
+    synth_regs.x.dx = (unsigned short)(b & 0xFF);
+    synth_regs.x.flags = 0;
+    synth_regs.x.es = synth_regs.x.ds = 0;
+    synth_regs.x.ss = synth_regs.x.sp = 0;
+    __dpmi_simulate_real_mode_interrupt(0x2F, &synth_regs);
+}
 
 extern unsigned short   g_ds_st;         /* our DS - lives IN .text (see below) */
 extern unsigned long    g_vd_old;        /* VDPMI: the handler before us,  */
@@ -343,11 +351,11 @@ asm(
  * if the UART is genuinely dead - the bound guards absent hardware, nothing
  * else.  /NOFIFO restores the old behaviour for A/B tests.               */
 "o_tx:                                                              \n"
-/* /OPL4: the byte goes to the compiled-in engine, not a UART.  DS is ours
- * (every caller set it); give the C code ES=DS too and preserve the rest.
- * The engine bypasses g_fifo - under HDPMI the handler cannot be
- * preempted, and /OPL4 refuses VDPMI at install (see OPL4ENG.H).      */
-"   cmp  byte ptr [_g_pmsynth], 0                                   \n"
+/* /SYNTH: the byte goes to the resident RM synth via DPMI 0300h, not a
+ * UART.  DS is ours (every caller set it); give the C code ES=DS too and
+ * preserve the rest.  Bypasses g_fifo - under HDPMI the handler cannot
+ * be preempted, and /SYNTH refuses VDPMI at install.                  */
+"   cmp  word ptr [_g_synth], 0                                     \n"
 "   je   o_tx_hw                                                    \n"
 "   pushad                                                          \n"
 "   push es                                                         \n"
@@ -355,7 +363,7 @@ asm(
 "   pop  es                                                         \n"
 "   movzx eax, bl                                                   \n"
 "   push eax                                                        \n"
-"   call _syn_byte_eng                                              \n"
+"   call _synth_rm_byte                                             \n"
 "   add  esp, 4                                                     \n"
 "   pop  es                                                         \n"
 "   popad                                                           \n"
@@ -1275,21 +1283,16 @@ int main(int argc, char **argv)
         else if (keymatch(a, "SYNTH="))
             g_synth = (unsigned short)((parse_hex(a + 6) << 8) | 0x01);
         else if (keymatch(a, "SYNTH")) g_synth = 0xBD01;
-        else if (keymatch(a, "OPL4=")) { g_pmsynth = 1; g_opl4base = parse_hex(a + 5); }
-        else if (keymatch(a, "OPL4"))  g_pmsynth = 1;
         else {
-            outs("MPUSHIM 0.5 - MPU-401 facade over a serial UART, all trap worlds.\n"
+            outs("MPUSHIM 0.6 - MPU-401 facade over a serial UART, all trap worlds.\n"
                  "  MPUSHIM [/UART=250] [/MPU=330] [/DIV=n] [/NORM] [/NOPM] [/NOVD]\n"
                  "  /UART  = serial UART base I/O port (default 250)\n"
                  "  /MPU   = MPU-401 base the game expects (default 330)\n"
                  "  /DIV   = reprogram the UART divisor for 31250 baud\n"
                  "  /NORM  = skip the V86 (QPI) side   /NOPM = skip the PM side\n"
-                 "  /SYNTH[=ah] = send MIDI to a resident INT 2Fh software\n"
-                 "           synth instead of the UART (default id BDh).\n"
-                 "           V86 games only - the PM side still needs a UART.\n"
-                 "  /OPL4[=388] = render MIDI on the OPL4 wavetable: the PM side\n"
-                 "           with this binary's own engine, the V86 side via the\n"
-                 "           /SYNTH sink (load OPL4SYN).  Refuses VDPMI.\n"
+                 "  /SYNTH[=ah] = send MIDI to a resident INT 2Fh software synth\n"
+                 "           (OPL4SYN, TDKSYN, ...; default id BDh) instead of\n"
+                 "           the UART - every world.  Refuses VDPMI.\n"
                  "  /NOVD  = ignore VDPMI, use the QPI + HDPMI pair instead\n"
                  "  /NOCLI = skip the DOS4G PUSHFD/CLI/POPFD interrupt heal\n"
                  "  diagnostics: /TRACE record traffic  /ACKALL ACK every command\n"
@@ -1304,17 +1307,10 @@ int main(int argc, char **argv)
     }
     g_stat = g_data + 1;
 
-    /* /OPL4: the PM side renders on the compiled-in engine and the V86 blob
-     * delivers to the resident RM synth over INT 2Fh (default id unless
-     * /SYNTH= overrode it).  VDPMI is refused: it can preempt a trap
-     * handler and this engine's guards are deliberately no-ops (OPL4ENG.H).
-     * Plain /SYNTH without /OPL4 is unchanged: the sink lives in the V86
-     * blob and nowhere else, so it must neither use VDPMI nor claim the
-     * protected-mode side. */
-    if (g_pmsynth) {
-        novd = 1;
-        if (!g_synth) g_synth = 0xBD01;
-    } else if (g_synth) { novd = 1; nopm = 1; }
+    /* /SYNTH covers every world: the V86 blob delivers natively and the PM
+     * handler reflects through DPMI 0300h.  VDPMI stays refused - it can
+     * preempt a handler mid-reflection and synth_regs is static. */
+    if (g_synth) novd = 1;
 
     if (dumpseg) { dump_trace(dumpseg); return 0; }
 
@@ -1392,34 +1388,17 @@ int main(int argc, char **argv)
         }
     }
 
-    if (g_pmsynth && !syn_init(g_opl4base)) {
-        outs("MPUSHIM: no OPL4 answers at ");
-        outhex(g_opl4base, 3);
-        outs(" - run the card enabler (VEW21XGO) first.\n");
-        return 3;
-    }
-
-    outs("MPUSHIM 0.5: MPU-401 ");
+    outs("MPUSHIM 0.6: MPU-401 ");
     outhex(g_data, 3);
     outs("/");
     outhex(g_stat, 3);
-    if (g_pmsynth) {
-        outs(" -> OPL4 wavetable at ");
-        outhex(g_opl4base, 3);
-        outs(" (PM side: internal engine)\n          V86 side -> synth INT 2Fh AH=");
-        outhex((unsigned)(g_synth >> 8), 2);
-        outs("\n");
-        if (!synth_present(g_synth))
-            outs("          WARNING: nothing answers that id - load OPL4SYN"
-                 " for V86 games\n");
-    } else if (g_synth) {
+    if (g_synth) {
         outs(" -> synth INT 2Fh AH=");
         outhex((unsigned)(g_synth >> 8), 2);
-        outs("\n");
+        outs(" (PM side via DPMI 0300h)\n");
         if (!synth_present(g_synth))
             outs("          WARNING: nothing answers that id - load the"
                  " synth TSR\n");
-        outs("          V86 games only (the PM side needs a UART)\n");
     } else {
         outs(" -> UART ");
         outhex(g_uart, 3);
