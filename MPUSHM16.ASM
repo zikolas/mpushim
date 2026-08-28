@@ -12,7 +12,12 @@
 ;  port trap through HDPMI16i's vendor API with FAR16 handlers, locks
 ;  itself down and stays resident.  Games are then started normally.
 ;
-;      MPUSHM16 [/UART=250] [/MPU=330]
+;      MPUSHM16 [/UART=250] [/MPU=330] [/SYNTH[=id]]
+;
+;  /SYNTH replaces the UART sink: each MIDI byte is handed to the resident
+;  real-mode INT 2Fh synth (OPL4SYN, default id BDh) through DPMI 0300h,
+;  so the 16-bit world shares the V86 world's engine instead of needing
+;  its own - see sb_synth for the contract and the precedent.
 ;
 ;  Prereq: HDPMI16I resident (-r -x).  Both HDPMI16i and HDPMI32i may be
 ;  installed at once (they share the TLB; HDPMI.TXT recommends installing
@@ -63,7 +68,7 @@
         cpu  386
         org  100h
 
-%define VERSION '0.1'
+%define VERSION '0.2'
 
 start:  jmp  init
 
@@ -78,6 +83,8 @@ mpu_stat  dw 0331h                   ; MPU status/command port
 ackpend   db 0                       ; 1 = 0FEh ACK waiting to be read
 uartmode  db 0                       ; informational
 drops     dw 0                       ; TX bytes dropped (UART dead)
+synthax   dw 0                       ; MIDI sink: 0 = the UART, else the AX
+                                     ; for a real-mode INT 2Fh synth (/SYNTH)
 
 ;==========================================================================
 ; OUT handler - the client wrote a byte to a trapped MPU port
@@ -224,6 +231,8 @@ send_bl:
         push ax
         push cx
         push dx
+        cmp  word [synthax], 0
+        jne  sb_synth
         mov  dx, [uart_base]
         add  dx, 5                   ; LSR
         mov  cx, 800                 ; >> one byte time; guards dead hw
@@ -243,6 +252,42 @@ sb_done:
         pop  cx
         pop  ax
         ret
+
+;--------------------------------------------------------------------------
+; BL -> the resident real-mode synth (OPL4SYN), via DPMI 0300h "simulate
+; real-mode interrupt": INT 2Fh with AX = synthax and the byte in DL runs
+; the V86 world's own sink from 16-bit protected mode, so this world needs
+; no engine of its own.  SS:SP stay 0 in the structure - the host provides
+; the real-mode stack.  Precedent for calling a DPMI translation service
+; from inside a trap handler: the 32-bit side's CLI-heal handler calls
+; int 31h fn 0901h from the same dispatch context (MPUSHIM.C).
+;--------------------------------------------------------------------------
+sb_synth:
+        push bx
+        push si
+        push di
+        push es
+        mov  ax, [synthax]
+        mov  [rmregs+28], ax         ; EAX for the real-mode handler
+        mov  dl, bl
+        xor  dh, dh
+        mov  [rmregs+20], dx         ; EDX - the byte in DL
+        xor  ax, ax
+        mov  [rmregs+32], ax         ; flags
+        mov  [rmregs+34], ax         ; ES
+        mov  [rmregs+36], ax         ; DS
+        mov  ax, 0300h
+        mov  bx, 002Fh               ; simulate INT 2Fh
+        xor  cx, cx
+        push ds
+        pop  es
+        mov  di, rmregs
+        int  31h
+        pop  es
+        pop  di
+        pop  si
+        pop  bx
+        jmp  sb_done
 
 ;==========================================================================
 ;                            installer (real mode)
@@ -274,9 +319,12 @@ m_nopm     db 'Could not enter protected mode.',13,10,'$'
 m_noapi    db 'No HDPMI vendor API (is this HDPMI16i, the IOPL-0 build?).',13,10,'$'
 m_notrap   db 'Trap refused - ports already trapped, or no free range.',13,10,'$'
 m_ok       db 'PM trap: armed. Resident.',13,10,'$'
-m_help     db 'MPUSHM16 [/UART=250] [/MPU=330]',13,10
+m_syn      db 'MIDI -> INT 2Fh synth (OPL4SYN); test note sent.',13,10,'$'
+m_help     db 'MPUSHM16 [/UART=250] [/MPU=330] [/SYNTH[=id]]',13,10
            db '  Traps the MPU ports for 16-BIT DPMI clients (Borland RTM,',13,10
            db '  Phar Lap 286, DOS/16M).  Needs HDPMI16I -r -x resident.',13,10
+           db '  /SYNTH sends MIDI to the resident real-mode INT 2Fh synth',13,10
+           db '  (OPL4SYN, default id BDh) instead of a UART.',13,10
            db '  32-bit DOS4GW games are the job of MPUSHIM.EXE; both may',13,10
            db '  be resident together.',13,10,'$'
 
@@ -339,10 +387,27 @@ cl_opt:
         je   cl_uart
         cmp  al, 'M'                 ; /MPU=
         je   cl_mpu
+        cmp  al, 'S'                 ; /SYNTH[=id]
+        je   cl_syn
         mov  dx, m_help              ; anything else: help and quit
         call say
         mov  ax, 4C00h
         int  21h
+cl_syn:
+        mov  al, [si+5]
+        cmp  al, '='
+        jne  cs_def
+        add  si, 6                   ; past "SYNTH="
+        call gethex
+        or   ax, ax
+        jnz  cs_have
+cs_def:
+        mov  ax, 0BDh                ; the default multiplex id
+cs_have:
+        mov  ah, al                  ; id -> AH
+        mov  al, 01h                 ; AL = "MIDI byte in DL"
+        mov  [synthax], ax
+        jmp  cl_loop
 cl_uart:
         add  si, 5                   ; past "UART="
         call gethex
@@ -443,6 +508,22 @@ api_got:
         mov  ax, 0600h               ; lock linear region
         int  31h
 lock_done:
+
+;--- /SYNTH smoke test: our own OUTs trap like any 16-bit client's, so one
+;--- hi-hat proves handler -> DPMI 0300h -> INT 2Fh -> the RM synth now,
+;--- with the failure at the install prompt instead of inside a game ------
+        cmp  word [synthax], 0
+        jz   st_skip
+        mov  dx, [mpu_data]
+        mov  al, 99h                 ; ch 10 note on
+        out  dx, al
+        mov  al, 2Ah                 ; closed hi-hat: one-shot, self-ending
+        out  dx, al
+        mov  al, 60h
+        out  dx, al
+        mov  dx, m_syn
+        call say
+st_skip:
 
         mov  dx, m_ok
         call say
