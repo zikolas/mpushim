@@ -136,6 +136,13 @@ is the whole configuration; `/SYNTH=xx` pairs with a synth loaded with
     MPUSHM16 /SYNTH
     MPUSHIM  /SYNTH
 
+On an MC-8000 the preset map is the vendor's SYNTH2GM.SF2; on a
+DMC-9000 it lives in the card's own ROM and TDKSYN takes `/F<bank>`
+with the extracted map — `go/GOTSYN9.BAT` is this recipe with that
+flag baked in. The
+[mc8kgo synth README](https://github.com/zikolas/mc8kgo/tree/master/synth)
+covers both maps, and `/M` selects the bank's MT-32 set on either card.
+
 **TDK MC-8000/DMC-9000 MIDI DIN** — external gear (a real MT-32/CM-32L
 or GM module) on the card's DIN socket:
 
@@ -185,6 +192,7 @@ one directory on the box; adjust paths to taste.
 | `go/GOW32.BAT` | VEW212: wavetable MIDI + VSBPCM digital (32-bit games) |
 | `go/GOW16.BAT` | VEW212: wavetable MIDI + VSBPCM16 digital (16-bit games) |
 | `go/GOTSYN.BAT` | TDK: MIDI to the card's own EMU8000 synth |
+| `go/GOTSYN9.BAT` | TDK DMC-9000: the same, with its extracted bank on `/F` |
 | `go/GOTDIN.BAT` | TDK: MIDI out of the card's DIN socket |
 | `tools/PMPOKE.EXE` | protected-mode smoke test |
 | `tools/PMSTORM`, `PMISR`, `PMHOG` | trap throughput, ISR-context, memory pressure |
