@@ -43,9 +43,11 @@ Anything whose MIDI output is a 16550-compatible UART. Two worked examples:
   `/UART=3F8 /DIV=3`, as in `GOC232.BAT`.
 * **Resident software synths** - `/SYNTH[=id]` delivers each byte to an
   INT 2Fh synth TSR instead of a UART, in every world (the protected-mode
-  sides reflect through DPMI 0300h). Two exist so far: [OPL4SYN](https://github.com/zikolas/vew21xgo/tree/master/synth)
-  (the CF-VEW212's OPL4 wavetable, shipped with its enabler) and TDKSYN
-  (the TDK MC-8000/DMC-9000's EMU8000; still to be released).
+  sides reflect through DPMI 0300h). Two exist so far, each shipped with
+  its card's enabler: [OPL4SYN](https://github.com/zikolas/vew21xgo/tree/master/synth)
+  (the CF-VEW212's OPL4 wavetable) and
+  [TDKSYN](https://github.com/zikolas/mc8kgo/tree/master/synth) (the TDK
+  MC-8000/DMC-9000's EMU8000).
 
 ## Requirements
 
